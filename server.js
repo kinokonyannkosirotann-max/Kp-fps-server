@@ -88,6 +88,23 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('kickPlayer', (d) => {
+    const targetName = String((d && d.targetName) || '').trim().toLowerCase();
+    const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
+    if (targetSid) {
+      io.to(targetSid).emit('youWereKicked', {});
+      const s = io.sockets.sockets.get(targetSid);
+      if (s) s.disconnect(true);
+    }
+  });
+
+  socket.on('chatMessage', (d) => {
+    const p = players[socket.id];
+    const text = String((d && d.text) || '').slice(0, 200);
+    if (!text) return;
+    socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
+  });
+  
   socket.on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
