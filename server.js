@@ -14,9 +14,9 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const players = {};
 const BOT_COUNT = 2;
 const BOT_WEAPONS = ['pistol', 'rifle'];
+const BOT_BULLET_SPEED = { pistol: 55, rifle: 65 };
 const FIELD_HALF = 105;
 const TOWER_SAFE_Y = 20;
-
 function randomSpot() {
   return { x: (Math.random() - 0.5) * FIELD_HALF * 1.7, z: (Math.random() - 0.5) * FIELD_HALF * 1.7 };
 }
