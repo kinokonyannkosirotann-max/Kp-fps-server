@@ -149,7 +149,7 @@ setInterval(() => {
         io.emit('remoteShotFired', { originX: bot.x, originY: bot.y + 1.3, originZ: bot.z, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
 
         const dot = (aimX*tdx + aimY*tdy + aimZ*tdz) / tlen;
-        if (dot > 1.085) {
+        if (dot > 0.990) {
           io.to(nearestSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
         }
       }
