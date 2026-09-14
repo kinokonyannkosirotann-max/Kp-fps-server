@@ -139,7 +139,7 @@ setInterval(() => {
         bot.lastShot = now;
         const tdx = nearest.x - bot.x, tdy = (nearest.y + 0.9) - (bot.y + 1.3), tdz = nearest.z - bot.z;
         const tlen = Math.sqrt(tdx*tdx + tdy*tdy + tdz*tdz) || 1;
-        const spread = 0.08;
+        const spread = 0.3;
         let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
         let aimY = tdy / tlen + (Math.random() - 0.5) * spread;
         let aimZ = tdz / tlen + (Math.random() - 0.5) * spread;
@@ -150,7 +150,12 @@ setInterval(() => {
 
         const dot = (aimX*tdx + aimY*tdy + aimZ*tdz) / tlen;
         if (dot > 0.990) {
-          io.to(nearestSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
+          const bulletSpeed = BOT_BULLET_SPEED[bot.weaponId] || 55;
+          const travelMs = Math.min(2000, (tlen / bulletSpeed) * 1000);
+          const targetSid = nearestSid;
+          setTimeout(() => {
+            if (players[targetSid]) io.to(targetSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
+          }, travelMs);
         }
       }
     } else {
