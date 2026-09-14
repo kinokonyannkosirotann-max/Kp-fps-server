@@ -121,20 +121,35 @@ setInterval(() => {
   const now = Date.now();
   for (const bot of bots) {
     if (bot.health <= 0) continue;
+
     let nearest = null, nearestDist = Infinity, nearestSid = null;
     for (const sid of Object.keys(players)) {
       const p = players[sid];
-      const d = Math.hypot(p.x - bot.x, p.z - bot.z);
+      const dx = p.x - bot.x, dy = p.y - bot.y, dz = p.z - bot.z;
+      const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
       if (d < nearestDist) { nearestDist = d; nearest = p; nearestSid = sid; }
     }
-    if (nearest && nearestDist < 35 && nearest.y < TOWER_SAFE_Y) {
+
+    if (nearest && nearestDist < 40 && nearest.y < TOWER_SAFE_Y) {
       const dx = nearest.x - bot.x, dz = nearest.z - bot.z;
-      const len = Math.hypot(dx, dz) || 1;
-      if (nearestDist > 8) { bot.x += (dx / len) * 0.5; bot.z += (dz / len) * 0.5; }
-      if (now - bot.lastShot > 1800) {
+      const horizLen = Math.hypot(dx, dz) || 1;
+      if (Math.hypot(dx, dz) > 8) { bot.x += (dx / horizLen) * 0.5; bot.z += (dz / horizLen) * 0.5; }
+
+      if (now - bot.lastShot > 1500) {
         bot.lastShot = now;
-        io.emit('remoteShotFired', { originX: bot.x, originY: bot.y, originZ: bot.z, dirX: dx / len, dirY: 0, dirZ: dz / len, weaponId: bot.weaponId });
-        if (Math.random() > 0.55) {
+        const tdx = nearest.x - bot.x, tdy = (nearest.y + 0.9) - (bot.y + 1.3), tdz = nearest.z - bot.z;
+        const tlen = Math.sqrt(tdx*tdx + tdy*tdy + tdz*tdz) || 1;
+        const spread = 0.08;
+        let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
+        let aimY = tdy / tlen + (Math.random() - 0.5) * spread;
+        let aimZ = tdz / tlen + (Math.random() - 0.5) * spread;
+        const alen = Math.sqrt(aimX*aimX + aimY*aimY + aimZ*aimZ) || 1;
+        aimX /= alen; aimY /= alen; aimZ /= alen;
+
+        io.emit('remoteShotFired', { originX: bot.x, originY: bot.y + 1.3, originZ: bot.z, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
+
+        const dot = (aimX*tdx + aimY*tdy + aimZ*tdz) / tlen;
+        if (dot > 0.985) {
           io.to(nearestSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
         }
       }
