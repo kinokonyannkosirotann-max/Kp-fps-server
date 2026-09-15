@@ -157,7 +157,7 @@ setInterval(() => {
         const leadZ = nearest.z + (nearest.velZ || 0) * travelTime * 0.9;
 
         const originX = bot.x, originY = bot.y + 1.3, originZ = bot.z;
-        const tdx = leadX - originX, tdy = (nearest.y + 0.9) - originY, tdz = leadZ - originZ;
+        const tdx = leadX - originX, tdy = (nearest.y - 0.2) - originY, tdz = leadZ - originZ;
         const tlen = Math.sqrt(tdx*tdx + tdy*tdy + tdz*tdz) || 1;
         const spread = 0.05;
         let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
