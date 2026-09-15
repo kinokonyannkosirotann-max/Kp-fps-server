@@ -14,7 +14,7 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const players = {};
 const BOT_COUNT = 2;
 const BOT_WEAPONS = ['pistol', 'rifle'];
-const BOT_WEAPON_SPEED = { pistol: 55, rifle: 65 }; // 先読み計算用のおおよその弾速
+const BOT_WEAPON_SPEED = { pistol: 55, rifle: 65 };
 const FIELD_HALF = 105;
 const TOWER_SAFE_Y = 20;
 
@@ -65,11 +65,7 @@ io.on('connection', (socket) => {
   socket.on('hitPlayer', (d) => {
     if (!d || !d.targetId) return;
     const attacker = players[socket.id];
-    const payload = {
-      damage: d.damage,
-      attackerName: attacker ? attacker.name : '???',
-      attackerId: socket.id
-    };
+    const payload = { damage: d.damage, attackerName: attacker ? attacker.name : '???', attackerId: socket.id };
     if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
       payload.kbX = d.kbX; payload.kbZ = d.kbZ; payload.kbForce = d.kbForce; payload.kbVertical = !!d.kbVertical;
     }
@@ -133,6 +129,7 @@ setInterval(() => {
   io.emit('botsUpdate', bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: b.x, y: b.y, z: b.z, weaponId: b.weaponId })));
 }, 100);
 
+// Botの簡易AI（0.2秒ごとに思考する）
 setInterval(() => {
   const now = Date.now();
   for (const bot of bots) {
@@ -159,7 +156,8 @@ setInterval(() => {
         const leadX = nearest.x + (nearest.velX || 0) * travelTime * 0.9;
         const leadZ = nearest.z + (nearest.velZ || 0) * travelTime * 0.9;
 
-        const tdx = leadX - bot.x, tdy = (nearest.y + 0.9) - (bot.y + 1.3), tdz = leadZ - bot.z;
+        const originX = bot.x, originY = bot.y + 1.3, originZ = bot.z;
+        const tdx = leadX - originX, tdy = (nearest.y + 0.9) - originY, tdz = leadZ - originZ;
         const tlen = Math.sqrt(tdx*tdx + tdy*tdy + tdz*tdz) || 1;
         const spread = 0.05;
         let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
@@ -168,12 +166,24 @@ setInterval(() => {
         const alen = Math.sqrt(aimX*aimX + aimY*aimY + aimZ*aimZ) || 1;
         aimX /= alen; aimY /= alen; aimZ /= alen;
 
-        io.emit('remoteShotFired', { originX: bot.x, originY: bot.y + 1.3, originZ: bot.z, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
+        io.emit('remoteShotFired', { originX, originY, originZ, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
 
-        const dot = (aimX*tdx + aimY*tdy + aimZ*tdz) / tlen;
-        if (dot > 0.975) {
-          io.to(nearestSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
-        }
+        // ★修正: 撃った瞬間ではなく、弾が実際に届くタイミングまで待ってから、その時のプレイヤーの位置で再判定する（避けられるようにする）
+        const targetSid = nearestSid;
+        const bulletTravelMs = Math.min(1800, Math.max(60, travelTime * 1000));
+        setTimeout(() => {
+          const p2 = players[targetSid];
+          if (!p2 || p2.health <= 0) return;
+          const travelSec = bulletTravelMs / 1000;
+          const bulletX = originX + aimX * bulletSpeed * travelSec;
+          const bulletY = originY + aimY * bulletSpeed * travelSec;
+          const bulletZ = originZ + aimZ * bulletSpeed * travelSec;
+          const ddx = p2.x - bulletX, ddy = (p2.y - 0.8) - bulletY, ddz = p2.z - bulletZ;
+          const hitDist = Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
+          if (hitDist < 1.3) {
+            io.to(targetSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
+          }
+        }, bulletTravelMs);
       }
     } else {
       if (Math.hypot(bot.targetX - bot.x, bot.targetZ - bot.z) < 1) {
