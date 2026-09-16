@@ -12,6 +12,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です'));
 
 const players = {};
+const chatOnlineUsers = {}; // KP Chat用: 永久ID -> 現在のsocket.id
 const BOT_COUNT = 2;
 const BOT_WEAPONS = ['pistol', 'rifle'];
 const BOT_WEAPON_SPEED = { pistol: 55, rifle: 65 };
