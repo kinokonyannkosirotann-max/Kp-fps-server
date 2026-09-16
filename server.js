@@ -142,6 +142,9 @@ io.on('connection', (socket) => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
+    for (const permId in chatOnlineUsers) {
+      if (chatOnlineUsers[permId] === socket.id) { delete chatOnlineUsers[permId]; break; }
+    }
   });
 });
 
