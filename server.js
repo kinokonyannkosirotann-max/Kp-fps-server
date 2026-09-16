@@ -118,6 +118,26 @@ io.on('connection', (socket) => {
     socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
   });
 
+  // ---- ここから KP Chat 用（銃ゲーとは無関係の、個チャ即時通知） ----
+  socket.on('chatJoin', (d) => {
+    const permId = String((d && d.id) || '').trim().toLowerCase();
+    if (!permId) return;
+    chatOnlineUsers[permId] = socket.id;
+  });
+
+  socket.on('dmMessage', (d) => {
+    if (!d || !d.targetId) return;
+    const targetPermId = String(d.targetId).trim().toLowerCase();
+    const targetSocketId = chatOnlineUsers[targetPermId];
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('dmMessage', {
+        senderId: d.senderId,
+        senderName: d.senderName,
+        text: d.text
+      });
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
