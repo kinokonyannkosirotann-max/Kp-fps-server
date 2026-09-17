@@ -138,6 +138,21 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('groupMessage', (d) => {
+    if (!d || !d.groupId || !Array.isArray(d.memberIds)) return;
+    const senderIdLower = String(d.senderId).trim().toLowerCase();
+    d.memberIds.forEach(function (memberPermId) {
+      const memberIdLower = String(memberPermId).trim().toLowerCase();
+      if (memberIdLower === senderIdLower) return;
+      const targetSocketId = chatOnlineUsers[memberIdLower];
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('groupMessage', {
+          groupId: d.groupId, groupName: d.groupName,
+          senderId: d.senderId, senderName: d.senderName, text: d.text
+        });
+      }
+    });
+  });
   socket.on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
