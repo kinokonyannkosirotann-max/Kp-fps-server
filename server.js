@@ -191,6 +191,10 @@ socket.on('grantOrbital', (d) => {
       io.to(targetSid).emit('orbitalGranted', { orbitalType: orbitalType, granterName: (d && d.granterName) || '誰か' });
     }
   });
+
+  socket.on('meleeSwing', (d) => {
+    socket.broadcast.emit('remoteMeleeSwing', { playerId: socket.id, weaponId: d && d.weaponId });
+  });
   
   socket.on('chatMessage', (d) => {
     const p = players[socket.id];
