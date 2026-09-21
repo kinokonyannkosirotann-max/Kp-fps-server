@@ -195,7 +195,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('meleeSwing', (d) => {
-    socket.broadcast.emit('remoteMeleeSwing', { playerId: socket.id, weaponId: d && d.weaponId });
+    socket.broadcast.emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
   
   socket.on('chatMessage', (d) => {
