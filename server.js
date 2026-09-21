@@ -122,8 +122,7 @@ io.on('connection', (socket) => {
     }
     if (d.stunMs) payload.stunMs = d.stunMs;
     io.to(d.targetId).emit('youWereHit', payload);
-    io.emit('playerHitFlash', { targetId: d.targetId });
-  });
+    io.emit('playerFlash', { targetId: d.targetId, attackerId: socket.id });  });
   
   socket.on('playerDied', (d) => {
     const victim = players[socket.id];
