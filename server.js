@@ -183,13 +183,14 @@ io.on('connection', (socket) => {
     }
   });
   
-socket.on('grantOrbital', (d) => {
+  socket.on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
-    const orbitalType = String((d && d.orbitalType) || '').trim().toLowerCase();
+    const orbitalType = String((d && d.orbitalType) || '').trim();
     if (orbitalType !== 'nuke' && orbitalType !== 'stab') return;
+    const granter = players[socket.id];
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
     if (targetSid) {
-      io.to(targetSid).emit('orbitalGranted', { orbitalType: orbitalType, granterName: (d && d.granterName) || '誰か' });
+      io.to(targetSid).emit('orbitalGranted', { orbitalType: orbitalType, granterName: granter ? granter.name : '誰か' });
     }
   });
 
