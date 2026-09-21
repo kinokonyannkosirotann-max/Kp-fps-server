@@ -124,7 +124,7 @@ io.on('connection', (socket) => {
     io.to(d.targetId).emit('youWereHit', payload);
     io.emit('playerHitFlash', { targetId: d.targetId });
   });
-
+  
   socket.on('playerDied', (d) => {
     const victim = players[socket.id];
     io.emit('killFeed', {
@@ -140,6 +140,7 @@ io.on('connection', (socket) => {
     if (!bot || bot.health <= 0) return;
     bot.health -= d.damage;
     if (d.stunMs) bot.stunnedUntil = Date.now() + d.stunMs;
+    io.emit('botHitFlash', { botId: bot.id }); 
     if (bot.health <= 0) {
       const attacker = players[socket.id];
       io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: attacker ? attacker.name : '???' });
