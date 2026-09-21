@@ -122,6 +122,7 @@ io.on('connection', (socket) => {
     }
     if (d.stunMs) payload.stunMs = d.stunMs;
     io.to(d.targetId).emit('youWereHit', payload);
+    io.emit('playerHitFlash', { targetId: d.targetId });
   });
 
   socket.on('playerDied', (d) => {
@@ -148,8 +149,12 @@ io.on('connection', (socket) => {
         bot.weaponId = BOT_WEAPONS[Math.floor(Math.random() * BOT_WEAPONS.length)];
       }, 6000);
     } else if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
-      bot.x += d.kbX * (d.kbForce || 2);
-      bot.z += d.kbZ * (d.kbForce || 2);
+          } else {
+      io.emit('botHitFlash', { botId: bot.id });
+      if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
+        bot.x += d.kbX * (d.kbForce || 2);
+        bot.z += d.kbZ * (d.kbForce || 2);
+      }
     }
   });
 
