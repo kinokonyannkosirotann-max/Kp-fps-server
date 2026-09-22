@@ -23,7 +23,6 @@ function randomSpot() {
   return { x: (Math.random() - 0.5) * FIELD_HALF * 1.7, z: (Math.random() - 0.5) * FIELD_HALF * 1.7 };
 }
 
-// ---- クライアントのfpsMakeSeededRandomと完全に同じアルゴリズム。値も必ず同じにしてください ----
 const ONLINE_MAP_SEED = 918273645;
 function makeSeededRandom(seed) {
   let s = seed >>> 0;
@@ -35,7 +34,6 @@ function makeSeededRandom(seed) {
   };
 }
 
-// Botが避ける「地面から天井まで塞がっている大きい建物」だけの簡易リスト
 const STATIC_OBSTACLES = [
   { x: 0, z: 0, hx: 3.2, hz: 3.2 },
   { x: 30, z: 0, hx: 4.8, hz: 4.8 },
@@ -53,7 +51,6 @@ function resolveBotMove(curX, curZ, desiredX, desiredZ) {
   return { x: testX, z: testZ };
 }
 
-// ---- 箱（クレート）：サーバーだけが状態を持ち、全員に同じものを見せる ----
 function generateCrateLayout() {
   const rand = makeSeededRandom(ONLINE_MAP_SEED);
   const H = FIELD_HALF;
@@ -80,6 +77,8 @@ function initBots() {
   }
 }
 initBots();
+
+const chatOnlineUsers = {};
 
 io.on('connection', (socket) => {
   socket.on('join', (d) => {
@@ -122,8 +121,9 @@ io.on('connection', (socket) => {
     }
     if (d.stunMs) payload.stunMs = d.stunMs;
     io.to(d.targetId).emit('youWereHit', payload);
-    io.emit('playerFlash', { targetId: d.targetId, attackerId: socket.id });  });
-  
+    socket.broadcast.emit('playerHitFlash', { targetId: d.targetId }); // ★本人は既にローカルで点滅済みなので、他の人にだけ知らせる
+  });
+
   socket.on('playerDied', (d) => {
     const victim = players[socket.id];
     io.emit('killFeed', {
@@ -139,7 +139,7 @@ io.on('connection', (socket) => {
     if (!bot || bot.health <= 0) return;
     bot.health -= d.damage;
     if (d.stunMs) bot.stunnedUntil = Date.now() + d.stunMs;
-    io.emit('botHitFlash', { botId: bot.id }); 
+    socket.broadcast.emit('botHitFlash', { botId: bot.id }); // ★本人は既にローカルで点滅済みなので、他の人にだけ知らせる
     if (bot.health <= 0) {
       const attacker = players[socket.id];
       io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: attacker ? attacker.name : '???' });
@@ -149,12 +149,8 @@ io.on('connection', (socket) => {
         bot.weaponId = BOT_WEAPONS[Math.floor(Math.random() * BOT_WEAPONS.length)];
       }, 6000);
     } else if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
-          } else {
-      io.emit('botHitFlash', { botId: bot.id });
-      if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
-        bot.x += d.kbX * (d.kbForce || 2);
-        bot.z += d.kbZ * (d.kbForce || 2);
-      }
+      bot.x += d.kbX * (d.kbForce || 2);
+      bot.z += d.kbZ * (d.kbForce || 2);
     }
   });
 
@@ -181,7 +177,7 @@ io.on('connection', (socket) => {
       if (s) s.disconnect(true);
     }
   });
-  
+
   socket.on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
@@ -196,7 +192,7 @@ io.on('connection', (socket) => {
   socket.on('meleeSwing', (d) => {
     socket.broadcast.emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
-  
+
   socket.on('chatMessage', (d) => {
     const p = players[socket.id];
     const text = String((d && d.text) || '').slice(0, 200);
@@ -242,14 +238,11 @@ io.on('connection', (socket) => {
   });
 });
 
-const chatOnlineUsers = {};
-
 setInterval(() => {
   io.emit('playersUpdate', players);
   io.emit('botsUpdate', bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: b.x, y: b.y, z: b.z, weaponId: b.weaponId })));
 }, 100);
 
-// Botの簡易AI（0.2秒ごと）
 setInterval(() => {
   const now = Date.now();
   for (const bot of bots) {
@@ -286,7 +279,7 @@ setInterval(() => {
         let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
         let aimY = tdy / tlen + (Math.random() - 0.5) * spread;
         let aimZ = tdz / tlen + (Math.random() - 0.5) * spread;
-        const alen = Math.sqrt(aimX*aimX + aimY*aimY + aimZ*aimZ) || 1;
+          const alen = Math.sqrt(aimX*aimX + aimY*aimY + aimZ*aimZ) || 1;
         aimX /= alen; aimY /= alen; aimZ /= alen;
 
         io.emit('remoteShotFired', { originX, originY, originZ, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
