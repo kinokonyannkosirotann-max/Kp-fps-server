@@ -94,7 +94,7 @@ io.on('connection', (socket) => {
     socket.emit('crateUpdate', onlineCrates);
   });
 
-  socket.on('updateState', (d) => {
+socket.on('updateState', (d) => {
     const p = players[socket.id];
     if (!p || !d) return;
     const now = Date.now();
@@ -106,8 +106,9 @@ io.on('connection', (socket) => {
     p.lastUpdateT = now;
     p.x = d.x; p.y = d.y; p.z = d.z; p.yaw = d.yaw;
     p.weaponId = d.weaponId; p.health = d.health;
-  });
-
+    p.isGliding = !!d.isGliding; p.isParachuting = !!d.isParachuting; // ★追加
+});
+  
   socket.on('shotFired', (d) => {
     socket.broadcast.emit('remoteShotFired', d);
   });
