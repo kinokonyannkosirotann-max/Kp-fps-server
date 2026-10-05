@@ -296,7 +296,7 @@ setInterval(() => {
           const bulletZ = originZ + aimZ * bulletSpeed * travelSec;
           const ddx = p2.x - bulletX, ddy = (p2.y - 0.8) - bulletY, ddz = p2.z - bulletZ;
           const hitDist = Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
-          if (hitDist < 1.3) {
+          if (hitDist < 2.2) {
             io.to(targetSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
           }
         }, bulletTravelMs);
