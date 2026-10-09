@@ -182,7 +182,7 @@ socket.on('updateState', (d) => {
   socket.on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
-    if (orbitalType !== 'nuke' && orbitalType !== 'stab') return;
+    if (orbitalType !== 'nuke' && orbitalType !== 'stab' && orbitalType !== 'railgun') return;
     const granter = players[socket.id];
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
     if (targetSid) {
