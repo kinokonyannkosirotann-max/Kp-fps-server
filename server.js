@@ -80,6 +80,25 @@ initBots();
 
 const chatOnlineUsers = {};
 
+// ==========================================
+// 🌺 ハワイの宝箱（取り合いの管理）／防具の共有
+// ==========================================
+const FX_CHEST_COUNT = 4;              // ★クライアントの宝箱の数（オンラインは4個）と同じにしてください
+const FX_CHEST_RESPAWN_MS = 90000;     // ★開けたあと、また閉まるまでの時間（ミリ秒）
+const fxChests = [];
+for (let i = 0; i < FX_CHEST_COUNT; i++) fxChests.push({ open: false, reopenAt: 0 });
+function fxOpenChestIds() {
+  const ids = [];
+  fxChests.forEach((c, i) => { if (c.open) ids.push(i); });
+  return ids;
+}
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  fxChests.forEach((c) => { if (c.open && now >= c.reopenAt) { c.open = false; changed = true; } });
+  if (changed) io.emit('fxChestState', { open: fxOpenChestIds() });
+}, 1000);
+
 io.on('connection', (socket) => {
   socket.on('join', (d) => {
     const spawn = randomSpot();
@@ -87,7 +106,7 @@ io.on('connection', (socket) => {
       id: (d && d.deviceId) || socket.id,
       name: (d && d.name) || 'プレイヤー',
       x: spawn.x, y: 28, z: spawn.z, yaw: 0,
-      weaponId: 'pistol', health: 100,
+      weaponId: 'pistol', health: 100, armor: '0,0,0,0',
       velX: 0, velZ: 0, lastUpdateT: 0
     };
     console.log('参加:', players[socket.id].name);
@@ -182,7 +201,7 @@ socket.on('updateState', (d) => {
   socket.on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
-    if (orbitalType !== 'nuke' && orbitalType !== 'stab' && orbitalType !== 'railgun') return;
+    if (orbitalType !== 'nuke' && orbitalType !== 'stab') return;
     const granter = players[socket.id];
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
     if (targetSid) {
@@ -192,6 +211,29 @@ socket.on('updateState', (d) => {
 
   socket.on('meleeSwing', (d) => {
     socket.broadcast.emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
+  });
+
+  // ---- 防具の共有（"3,2,0,1" のような短い文字列。0＝なし、1〜3＝ランク）----
+  socket.on('fxArmor', (d) => {
+    const p = players[socket.id];
+    const code = String((d && d.code) || '');
+    if (!p || !/^[0-3],[0-3],[0-3],[0-3]$/.test(code)) return;
+    p.armor = code;
+  });
+
+  // ---- ハワイの宝箱 ----
+  socket.on('fxChestSync', () => {
+    socket.emit('fxChestState', { open: fxOpenChestIds() });
+  });
+  socket.on('fxChestOpen', (d) => {
+    const id = d && d.id;
+    if (!players[socket.id] || !Number.isInteger(id) || id < 0 || id >= FX_CHEST_COUNT) return;
+    const chest = fxChests[id];
+    if (chest.open) { socket.emit('fxChestDenied', { id: id }); return; }   // 先に誰かが開けていた
+    chest.open = true;
+    chest.reopenAt = Date.now() + FX_CHEST_RESPAWN_MS;
+    socket.emit('fxChestGranted', { id: id });                              // 開けた本人にだけ「中身をどうぞ」
+    io.emit('fxChestState', { open: fxOpenChestIds() });                    // 全員に「開いた」と知らせる
   });
 
   socket.on('chatMessage', (d) => {
