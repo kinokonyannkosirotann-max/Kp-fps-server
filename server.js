@@ -99,6 +99,25 @@ setInterval(() => {
   if (changed) io.emit('fxChestState', { open: fxOpenChestIds() });
 }, 1000);
 
+// ==========================================
+// 🛠️ 設置物（銃台座・地雷）の管理
+// ==========================================
+const FX_MAX_MINES = 6;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
+const FX_MAX_TURRETS = 2;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
+const FX_TURRET_HP = 200;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
+const FX_MAX_HIT_PER_SHOT = 120;   // 1回のダメージの上限（ズル対策）
+const fxPlaced = {};               // いま置かれている物（id → 設置物）
+let fxPlacedSeq = 0;
+function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
+function fxPlacedOwnedCount(sid, kind) { let n = 0; for (const id in fxPlaced) { if (fxPlaced[id].ownerSid === sid && fxPlaced[id].kind === kind) n++; } return n; }
+function fxRespawnBot(bot) {
+  setTimeout(() => {
+    const p = randomSpot();
+    bot.health = 100; bot.x = p.x; bot.z = p.z; bot.stunnedUntil = 0;
+    bot.weaponId = BOT_WEAPONS[Math.floor(Math.random() * BOT_WEAPONS.length)];
+  }, 6000);
+}
+
 io.on('connection', (socket) => {
   socket.on('join', (d) => {
     const spawn = randomSpot();
@@ -135,7 +154,7 @@ socket.on('updateState', (d) => {
   socket.on('hitPlayer', (d) => {
     if (!d || !d.targetId) return;
     const attacker = players[socket.id];
-    const payload = { damage: d.damage, attackerName: attacker ? attacker.name : '???', attackerId: socket.id };
+    const payload = { damage: d.damage, attackerName: attacker ? (attacker.name + (d.viaTurret ? 'のタレット' : '')) : '???', attackerId: socket.id };
     if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
       payload.kbX = d.kbX; payload.kbZ = d.kbZ; payload.kbForce = d.kbForce; payload.kbVertical = !!d.kbVertical;
     }
@@ -236,6 +255,82 @@ socket.on('updateState', (d) => {
     io.emit('fxChestState', { open: fxOpenChestIds() });                    // 全員に「開いた」と知らせる
   });
 
+  // ---- 設置物（銃台座・地雷）----
+  socket.on('fxPlacedSync', () => {
+    socket.emit('fxPlacedList', { list: Object.values(fxPlaced).map(fxPlacedInfo) });
+  });
+  socket.on('fxPlace', (d) => {
+    const p = players[socket.id];
+    if (!p || !d) return;
+    const kind = d.kind === 'turret' ? 'turret' : (d.kind === 'mine' ? 'mine' : null);
+    const x = Number(d.x), y = Number(d.y), z = Number(d.z);
+    if (!kind || !Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || Math.abs(x) > FIELD_HALF + 10 || Math.abs(z) > FIELD_HALF + 10 || y < -5 || y > 80) {
+      socket.emit('fxPlaceDenied', { kind: kind || 'mine', reason: '場所が正しくありません' }); return;
+    }
+    const lim = kind === 'turret' ? FX_MAX_TURRETS : FX_MAX_MINES;
+    if (fxPlacedOwnedCount(socket.id, kind) >= lim) {
+      socket.emit('fxPlaceDenied', { kind: kind, reason: (kind === 'turret' ? '銃台座は' : '地雷は') + lim + '個までです' }); return;
+    }
+    const o = { id: 'p' + (++fxPlacedSeq), kind: kind, ownerSid: socket.id, ownerName: String(p.name || 'プレイヤー').slice(0, 24), x: x, y: y, z: z, hp: kind === 'turret' ? FX_TURRET_HP : 1, gun: null };
+    fxPlaced[o.id] = o;
+    io.emit('fxPlacedAdd', { obj: fxPlacedInfo(o) });
+  });
+  socket.on('fxMount', (d) => {   // 銃を付ける／外す（持ち主だけ）
+    const o = d && fxPlaced[d.id];
+    if (!o || o.ownerSid !== socket.id || o.kind !== 'turret') return;
+    const gun = (d.gun === null || d.gun === undefined || d.gun === '') ? null : String(d.gun);
+    if (gun !== null && !/^[a-z0-9_]{1,24}$/.test(gun)) return;
+    o.gun = gun;
+    io.emit('fxPlacedUpdate', { id: o.id, gun: o.gun });
+  });
+  socket.on('fxRemove', (d) => {   // 撤去（持ち主だけ）
+    const o = d && fxPlaced[d.id];
+    if (!o || o.ownerSid !== socket.id) return;
+    delete fxPlaced[o.id];
+    io.emit('fxPlacedRemove', { id: o.id, reason: 'removed' });
+  });
+  socket.on('fxHitPlaced', (d) => {   // 台座へのダメージ（持ち主以外）
+    const o = d && fxPlaced[d.id];
+    const me = players[socket.id];
+    if (!o || !me || o.kind !== 'turret' || o.ownerSid === socket.id) return;
+    const dmg = Math.min(FX_MAX_HIT_PER_SHOT, Math.max(0, Number(d.damage) || 0));
+    if (dmg <= 0) return;
+    o.hp -= dmg;
+    if (o.hp <= 0) {
+      delete fxPlaced[o.id];
+      io.emit('fxPlacedRemove', { id: o.id, reason: 'destroyed', byId: socket.id, byName: me.name });
+    } else {
+      io.emit('fxPlacedHp', { id: o.id, hp: o.hp });
+    }
+  });
+  socket.on('fxMineTrigger', (d) => {   // 地雷が踏まれた（step）／持ち主のところにBotが来た（bot）／誘爆（chain）
+    const o = d && fxPlaced[d.id];
+    const me = players[socket.id];
+    if (!o || o.kind !== 'mine' || !me) return;
+    if (d.why === 'bot') { if (o.ownerSid !== socket.id) return; }
+    else if (d.why === 'step') { if (o.ownerSid === socket.id || Math.hypot(me.x - o.x, me.z - o.z) > 7) return; }
+    else if (d.why === 'chain') { if (Math.hypot(me.x - o.x, me.z - o.z) > 60) return; }
+    else return;
+    delete fxPlaced[o.id];
+    io.emit('fxMineBoom', { id: o.id, x: o.x, y: o.y, z: o.z, ownerId: o.ownerSid, ownerName: o.ownerName, victimId: socket.id });
+  });
+  socket.on('fxTAim', (d) => {   // 台座の頭の向き（他の人の画面で回して見せるため）
+    const o = d && fxPlaced[d.id];
+    if (!o || o.ownerSid !== socket.id || o.kind !== 'turret' || !Number.isFinite(d.yaw) || !Number.isFinite(d.pitch)) return;
+    socket.broadcast.emit('fxTAimRelay', { id: o.id, yaw: d.yaw, pitch: d.pitch });
+  });
+  socket.on('fxTBotHit', (d) => {   // タレット・地雷がBotに当たった（倒しても、誰にも報酬は出ません）
+    if (!players[socket.id] || !d) return;
+    const bot = bots.find(b => b.id === d.botId);
+    if (!bot || bot.health <= 0) return;
+    bot.health -= Math.min(80, Math.max(0, Number(d.damage) || 0));
+    socket.broadcast.emit('botHitFlash', { botId: bot.id });
+    if (bot.health <= 0) {
+      io.emit('botKilled', { botId: bot.id, killerId: null, killerName: '🛠️ 設置物' });
+      fxRespawnBot(bot);
+    }
+  });
+
   socket.on('chatMessage', (d) => {
     const p = players[socket.id];
     const text = String((d && d.text) || '').slice(0, 200);
@@ -275,6 +370,9 @@ socket.on('updateState', (d) => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
+    for (const id of Object.keys(fxPlaced)) {
+      if (fxPlaced[id].ownerSid === socket.id) { delete fxPlaced[id]; io.emit('fxPlacedRemove', { id: id, reason: 'left' }); }
+    }
     for (const permId in chatOnlineUsers) {
       if (chatOnlineUsers[permId] === socket.id) { delete chatOnlineUsers[permId]; break; }
     }
