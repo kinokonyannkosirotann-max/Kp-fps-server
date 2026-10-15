@@ -103,9 +103,9 @@ setInterval(() => {
 // 🛠️ 設置物（銃台座・地雷）の管理
 // ==========================================
 const FX_MAX_MINES = 6;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
-const FX_MAX_TURRETS = 2;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
-const FX_TURRET_HP = 200;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
-const FX_MAX_HIT_PER_SHOT = 120;   // 1回のダメージの上限（ズル対策）
+const FX_MAX_TURRETS = 3;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
+const FX_TURRET_HP = 300;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
+const FX_MAX_HIT_PER_SHOT = 150;   // 1回のダメージの上限（ズル対策）
 const fxPlaced = {};               // いま置かれている物（id → 設置物）
 let fxPlacedSeq = 0;
 function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
