@@ -103,7 +103,7 @@ const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
 const BOT_UP_BASE = 3.8;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
 const BOT_UP_MAX = 12;
-const BOT_KB_MAX = 15;           // 1回の横の吹き飛ばしの上限（ズル対策）
+const BOT_KB_MAX = 45;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
   for (let i = 0; i < BOT_COUNT; i++) {
