@@ -29,7 +29,7 @@ const FIELD_HALF = 105;          // Botや箱が出てくる範囲（元のフ�
 const WORLD_HALF = 150;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
-const SPAWN_Y = 92;              // 参加した直後の高さ（塔のてっぺん）
+const SPAWN_Y = 93;              // 参加した直後の高さ（塔のてっぺん）
 const NETHER_Y = 900;            // これより上にいる人は「ネザーにいる」
 const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上限（塔のてっぺんは約92m）
 
@@ -100,9 +100,9 @@ let onlineCrates = generateCrateLayout();
 // ==========================================
 const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（クライアントと同じ）
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
-const BOT_UP_BASE = 3.4;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
+const BOT_UP_BASE = 3.8;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
-const BOT_UP_MAX = 11;
+const BOT_UP_MAX = 12;
 const BOT_KB_MAX = 15;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
