@@ -146,8 +146,8 @@ function fxOpenChestIds() {
 // 箱の番号と場所は、ネザーを作る⑫-B が決めた順番（0番から）です。みんな同じネザーなので、番号も同じになります
 const FX_NCHEST_COUNT = 22;                // ★ネザーの箱の数（⑫-B が作る数）と同じにしてください
 const FX_NCHEST_RARE = [0, 1, 2, 3];       // ★レアチェストの番号（ピラミッドのてっぺん×3・要塞の中央）
-const FX_NCHEST_RESPAWN_MS = 150000;       // ふつうの箱：開けてから、また閉まるまで
-const FX_NCHEST_RARE_RESPAWN_MS = 300000;  // レアチェスト
+const FX_NCHEST_RESPAWN_MS = 250000;       // ふつうの箱：開けてから、また閉まるまで
+const FX_NCHEST_RARE_RESPAWN_MS = 400000;  // レアチェスト
 const fxNChests = [];
 for (let i = 0; i < FX_NCHEST_COUNT; i++) fxNChests.push({ open: false, reopenAt: 0, rare: FX_NCHEST_RARE.indexOf(i) >= 0 });
 function fxNChestList() {   // いま開いている箱：[[番号, また閉まるまでの残りミリ秒], ...]
