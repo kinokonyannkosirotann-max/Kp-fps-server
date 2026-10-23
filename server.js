@@ -1,11 +1,16 @@
 // ==========================================
-// KP銃ゲー オンライン対戦サーバー（完成版 ver.8）
+// KP銃ゲー オンライン対戦サーバー（完成版 ver.9）
 // ==========================================
-// 前の版（server7）から増えたもの：
+// 前の版（server8）から増えたもの：
+//  ・ゴッドライフル：当たった相手を「鈍足」にする／防具を無視するダメージを、撃たれた相手の画面へ伝える（hitPlayer の slowMs・pierce）
+//  ・オンラインのBotも、ゴッドライフルで鈍足になる（hitBot の slowMs → 動きが 0.4 倍）
+//  ・Botの弾の速さを、クライアントの「弾の速さ調整表（⑱-A）」と同じ倍率に（見た目と当たる速さをそろえる）
+//  ・ニュークは「nuke」＋数字（nuke1〜nuke999）なら何でも他のプレイヤーに渡せる（grantOrbital）… 自分で作ったレベル10なども OK
+//
+// それ以前（server8 までに入っていたもの）：
 //  ・ネザーの宝箱を、全員で同じ箱を取り合う形に（fxNChest…）
 //  ・他のプレイヤーの「上下の向き（pitch）」と「しゃがみ」を中継（頭・武器が上を向く／しゃがみが見える）
 //  ・オンラインのBotも、上に吹き飛ぶ（hitBot の kbVertical → 重力で落ちる）
-//  ・ニューク1/2/3/5・railgun を、他のプレイヤーに渡せる（grantOrbital）
 //  ・ネザライト防具（Lv4）の共有
 //  ・塔の上（高さ130mまで）と、広げたフィールドの外側にも、銃台座・地雷を置ける
 //  ・おかしな数字（NaN・巨大なダメージ）を無視して、サーバーが落ちにくく
@@ -18,18 +23,24 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.8）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.9）'));
 
-const SERVER_VERSION = 8;
+const SERVER_VERSION = 9;
 const players = {};
 const BOT_COUNT = 2;
 const BOT_WEAPONS = ['pistol', 'rifle'];
-const BOT_WEAPON_SPEED = { pistol: 55, rifle: 65 };
+const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
+const BOT_WEAPON_SPEED = { pistol: Math.round(55 * BOT_BULLET_MUL), rifle: Math.round(65 * BOT_BULLET_MUL) };
+const BOT_SPEED_DEFAULT = Math.round(55 * BOT_BULLET_MUL);
+const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（クライアントの FX18_SLOW_MUL と同じ）
+const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
+const FX_GOD_MAX_DAMAGE = 150;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
+const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
 const FIELD_HALF = 105;          // Botや箱が出てくる範囲（元のフィールドの半幅）
 const WORLD_HALF = 150;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
-const SPAWN_Y = 93;              // 参加した直後の高さ（塔のてっぺん）
+const SPAWN_Y = 92;              // 参加した直後の高さ（塔のてっぺん）
 const NETHER_Y = 900;            // これより上にいる人は「ネザーにいる」
 const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上限（塔のてっぺんは約92m）
 
@@ -100,22 +111,22 @@ let onlineCrates = generateCrateLayout();
 // ==========================================
 const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（クライアントと同じ）
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
-const BOT_UP_BASE = 3.8;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
+const BOT_UP_BASE = 3.4;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
-const BOT_UP_MAX = 12;
-const BOT_KB_MAX = 45;           // 1回の横の吹き飛ばしの上限（ズル対策）
+const BOT_UP_MAX = 11;
+const BOT_KB_MAX = 15;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
   for (let i = 0; i < BOT_COUNT; i++) {
     const p = randomSpot();
-    bots.push({ id: 'bot_' + i, x: p.x, y: BOT_REST_Y, vy: 0, z: p.z, targetX: p.x, targetZ: p.z, health: 100, weaponId: BOT_WEAPONS[i % BOT_WEAPONS.length], lastShot: 0, stunnedUntil: 0 });
+    bots.push({ id: 'bot_' + i, x: p.x, y: BOT_REST_Y, vy: 0, z: p.z, targetX: p.x, targetZ: p.z, health: 100, weaponId: BOT_WEAPONS[i % BOT_WEAPONS.length], lastShot: 0, stunnedUntil: 0, slowUntil: 0 });
   }
 }
 initBots();
 function respawnBotLater(bot) {
   setTimeout(() => {
     const p = randomSpot();
-    bot.health = 100; bot.x = p.x; bot.z = p.z; bot.y = BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0;
+    bot.health = 100; bot.x = p.x; bot.z = p.z; bot.y = BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0; bot.slowUntil = 0;
     bot.weaponId = BOT_WEAPONS[Math.floor(Math.random() * BOT_WEAPONS.length)];
   }, 6000);
 }
@@ -146,8 +157,8 @@ function fxOpenChestIds() {
 // 箱の番号と場所は、ネザーを作る⑫-B が決めた順番（0番から）です。みんな同じネザーなので、番号も同じになります
 const FX_NCHEST_COUNT = 22;                // ★ネザーの箱の数（⑫-B が作る数）と同じにしてください
 const FX_NCHEST_RARE = [0, 1, 2, 3];       // ★レアチェストの番号（ピラミッドのてっぺん×3・要塞の中央）
-const FX_NCHEST_RESPAWN_MS = 250000;       // ふつうの箱：開けてから、また閉まるまで
-const FX_NCHEST_RARE_RESPAWN_MS = 400000;  // レアチェスト
+const FX_NCHEST_RESPAWN_MS = 150000;       // ふつうの箱：開けてから、また閉まるまで
+const FX_NCHEST_RARE_RESPAWN_MS = 300000;  // レアチェスト
 const fxNChests = [];
 for (let i = 0; i < FX_NCHEST_COUNT; i++) fxNChests.push({ open: false, reopenAt: 0, rare: FX_NCHEST_RARE.indexOf(i) >= 0 });
 function fxNChestList() {   // いま開いている箱：[[番号, また閉まるまでの残りミリ秒], ...]
@@ -177,7 +188,9 @@ let fxPlacedSeq = 0;
 function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
 function fxPlacedOwnedCount(sid, kind) { let n = 0; for (const id in fxPlaced) { if (fxPlaced[id].ownerSid === sid && fxPlaced[id].kind === kind) n++; } return n; }
 
-const ORBITAL_TYPES = ['nuke', 'nuke1', 'nuke3', 'nuke5', 'stab', 'railgun'];   // nuke ＝ レベル2（今までの強さ）
+function isOrbitalType(t) {   // nuke ＝ レベル2（今までの強さ）／nuke1・nuke3・nuke5・nuke10 … ＝ レベル指定（nuke1〜nuke999）
+  return t === 'nuke' || t === 'stab' || t === 'railgun' || /^nuke[1-9][0-9]{0,2}$/.test(t);
+}
 
 io.on('connection', (socket) => {
   const on = function (ev, fn) { socket.on(ev, guard(ev, fn)); };
@@ -191,7 +204,7 @@ io.on('connection', (socket) => {
       name: String((d && d.name) || 'プレイヤー').slice(0, 24),
       x: ONLINE_TOWER.x, y: SPAWN_Y, z: ONLINE_TOWER.z, yaw: 0, pitch: 0,
       weaponId: 'pistol', health: 100, armor: '0,0,0,0', crouching: false,
-      velX: 0, velZ: 0, lastUpdateT: 0
+      velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
     };
     console.log('参加:', players[socket.id].name);
     socket.emit('crateUpdate', onlineCrates);
@@ -231,6 +244,16 @@ io.on('connection', (socket) => {
       payload.kbForce = num(d.kbForce, 0, 30, 6); payload.kbVertical = !!d.kbVertical;
     }
     if (d.stunMs) payload.stunMs = num(d.stunMs, 0, 6000, 0);
+    if (d.weaponId === 'godrifle' && attacker) {   // ★ゴッドライフル：防具無視（pierce）と鈍足（slowMs）を、撃たれた相手に伝える（ほかの武器が送ってきても無視）
+      payload.damage = Math.min(payload.damage, FX_GOD_MAX_DAMAGE);
+      const nowG = Date.now();
+      if (nowG - (attacker.lastGodHitAt || 0) >= FX_GOD_MIN_GAP_MS) {   // 連射が速すぎる時は、特別な効果なし（ダメージだけ）
+        attacker.lastGodHitAt = nowG;
+        if (d.pierce === true) payload.pierce = true;
+        const slow = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);
+        if (slow > 0) payload.slowMs = slow;
+      }
+    }
     io.to(d.targetId).emit('youWereHit', payload);
     socket.broadcast.emit('playerHitFlash', { targetId: d.targetId }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
   });
@@ -251,6 +274,8 @@ io.on('connection', (socket) => {
     if (!bot || bot.health <= 0) return;
     bot.health -= num(d.damage, 0, 250, 0);
     if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
+    const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ★ゴッドライフルで撃たれたBotは、しばらく鈍足
+    if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
     socket.broadcast.emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
     if (bot.health <= 0) {
       const attacker = players[socket.id];
@@ -292,7 +317,7 @@ io.on('connection', (socket) => {
   on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
-    if (ORBITAL_TYPES.indexOf(orbitalType) < 0) return;   // ★nuke1/3/5・railgun も渡せる
+    if (!isOrbitalType(orbitalType)) return;   // ★nuke＋数字・railgun も渡せる
     const granter = players[socket.id];
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
     if (targetSid) {
@@ -493,6 +518,7 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
   for (const bot of bots) {
     if (bot.health <= 0) continue;
     if (bot.stunnedUntil && now < bot.stunnedUntil) continue;
+    const slowK = (bot.slowUntil && now < bot.slowUntil) ? BOT_SLOW_MUL : 1;   // ★鈍足中は、動きが 0.4 倍
 
     let nearest = null, nearestDist = Infinity, nearestSid = null;
     for (const sid of Object.keys(players)) {
@@ -506,13 +532,13 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
       const dx = nearest.x - bot.x, dz = nearest.z - bot.z;
       const horizLen = Math.hypot(dx, dz) || 1;
       if (horizLen > 8) {
-        const moved = resolveBotMove(bot.x, bot.z, bot.x + (dx / horizLen) * 0.5, bot.z + (dz / horizLen) * 0.5);
+        const moved = resolveBotMove(bot.x, bot.z, bot.x + (dx / horizLen) * 0.5 * slowK, bot.z + (dz / horizLen) * 0.5 * slowK);
         bot.x = moved.x; bot.z = moved.z;
       }
 
       if (now - bot.lastShot > 1500) {
         bot.lastShot = now;
-        const bulletSpeed = BOT_WEAPON_SPEED[bot.weaponId] || 55;
+        const bulletSpeed = BOT_WEAPON_SPEED[bot.weaponId] || BOT_SPEED_DEFAULT;
         const travelTime = nearestDist / bulletSpeed;
         const leadX = nearest.x + (nearest.velX || 0) * travelTime * 0.9;
         const leadZ = nearest.z + (nearest.velZ || 0) * travelTime * 0.9;
@@ -551,7 +577,7 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
       }
       const dx = bot.targetX - bot.x, dz = bot.targetZ - bot.z;
       const len = Math.hypot(dx, dz) || 1;
-      const moved = resolveBotMove(bot.x, bot.z, bot.x + (dx / len) * 0.2, bot.z + (dz / len) * 0.2);
+      const moved = resolveBotMove(bot.x, bot.z, bot.x + (dx / len) * 0.2 * slowK, bot.z + (dz / len) * 0.2 * slowK);
       bot.x = moved.x; bot.z = moved.z;
     }
   }
@@ -562,4 +588,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.8）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.9）起動しました。ポート: ' + PORT));
