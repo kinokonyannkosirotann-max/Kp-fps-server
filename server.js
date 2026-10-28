@@ -130,7 +130,7 @@ let onlineCrates = generateCrateLayout();
 // ==========================================
 const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（クライアントと同じ）
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
-const BOT_UP_BASE = 4.5;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
+const BOT_UP_BASE = 3.2;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 2.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります 2.7） 
 const BOT_UP_MAX = 90;
 const BOT_KB_MAX = 120;           // 1回の横の吹き飛ばしの上限（ズル対策）
