@@ -53,7 +53,7 @@ const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上�
 
 // ---------- ブロック（クライアントの⑲）の決まり ----------
 const FX_BLOCK_MAX_TOTAL = 500;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
-const FX_BLOCK_MAX_PER_PLAYER = 230;      // 1人が同時に置いておける数
+const FX_BLOCK_MAX_PER_PLAYER = 550;      // 1人が同時に置いておける数
 const FX_BLOCK_MAX_Y = 120;               // ★クライアントの FX19_MAX_Y と同じ数字に（置ける高さの上限）
 const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半幅 − 2。クライアントと同じ考え方）
 const FX_BLOCK_REACH = 14;                // 置く・壊す時に、サーバーが知っているプレイヤーの位置からこの距離(m)まで（通信の遅れの余裕を含む。ふつうの遊び方は6m）
