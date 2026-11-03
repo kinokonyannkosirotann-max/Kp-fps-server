@@ -81,7 +81,7 @@ const NETHER_Y = 900;            // これより上にいる人は「ネザー�
 const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上限（塔のてっぺんは約92m）
 
 // ---------- ブロック（クライアントの⑲）の決まり ----------
-const FX_BLOCK_MAX_TOTAL = 3500;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
+const FX_BLOCK_MAX_TOTAL = 5500;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
 const FX_BLOCK_MAX_PER_PLAYER = 1500;      // 1人が同時に置いておける数
 const FX_BLOCK_MAX_Y = 120;               // ★クライアントの FX19_MAX_Y と同じ数字に（置ける高さの上限）
 const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半幅 − 2。クライアントと同じ考え方）
