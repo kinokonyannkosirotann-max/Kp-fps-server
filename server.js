@@ -1,8 +1,17 @@
 // ==========================================
-// KP銃ゲー オンライン対戦サーバー（完成版 ver.10）
+// KP銃ゲー オンライン対戦サーバー（完成版 ver.11）
 // ==========================================
-
-// 前の版（server9）から増えたもの：
+// ver.11 で増えたもの（server10 から）：
+//  ・オンラインのBotが、確率でいろいろな武器を持つ（ピストル・サブマシンガン・アサルトライフル・ショットガン・リボルバー・マークスマン）
+//     … 武器ごとに「撃つ間隔・連射・1発のダメージ・届く距離」が違います（下の BOT_GUNS を直すと調整できます）。強さは昔のBot（ピストル）と同じくらい。
+//        倒すと、持っていた武器がもらえます（見た目・撃ち方・もらえる武器が、ぜんぶ同じになります）
+//  ・shotFired（撃った知らせ）を中継する時に、撃った人のID（id）を付けるようにした
+//     … 神器の「撃つ動き」が、相手の画面でも、撃った人の人形に出ます（今までは id が無くて、人形が動きませんでした）
+//  ・武器を奪う：倒した人が「実際に受け取れた」と知らせた時だけ、倒された人の手持ちからその武器を消す（weaponStolen → weaponTaken）
+//     … 倒すたびに武器がコピーされて増え続ける問題の対策。すでに持っている武器は、奪われない（倒された人も、なくさない）
+//  ・shotFired は、1人あたり1秒に 60 回までにした（連打・なりすまし対策）
+//
+// 前の版（server9）から増えたもの（ver.10 の内容）：
 //  ・ブロック（クライアントの⑲）：置く・壊す・爆発で壊れる、を全員で共有（fxBlockPlace／fxBlockBreak／fxBlockBlast）
 //     … 置ける数・距離・高さ・場所などは、サーバーが確かめます（ズル・バグ対策）。ブロックの種類は、クライアントが増やしても、そのまま使えます
 //  ・壊れたマップの建物・岩・壁を全員で共有し、30分（FX_MAP_RESTORE_MS）たつと全員の画面で元に戻す（fxMapBreak／fxMapBroken／fxMapRestored）
@@ -30,18 +39,38 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.10）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.11）'));
 
-const SERVER_VERSION = 10;
+const SERVER_VERSION = 11;
 const players = {};
 const BOT_COUNT = 2;
-const BOT_WEAPONS = ['pistol', 'rifle'];
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
-const BOT_WEAPON_SPEED = { pistol: Math.round(55 * BOT_BULLET_MUL), rifle: Math.round(65 * BOT_BULLET_MUL) };
-const BOT_SPEED_DEFAULT = Math.round(55 * BOT_BULLET_MUL);
+// ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
+//   w＝出やすさ（重み。合計に対する割合）／gap＝撃つ間隔(ms)／dmg＝1発のダメージ／n＝1回に何発ずつ撃つか／burstGap＝その連射の間隔(ms)
+//   spread＝弾のばらつき／speed＝弾の速さ（クライアントの元の数字。上の BOT_BULLET_MUL をかけます）／range＝この距離(m)より遠くは撃たない
+//   pellets＝ショットガンの粒の数（近いほど多く当たる）
+//   強さの目安：1回に撃つ分の最大ダメージが 12〜15 ほど（昔のBotは 6 を 1.5 秒ごと）。ばらつき・動きで、実際に当たるのは、もっと少なめです
+const BOT_GUNS = {
+  pistol:   { w: 38, gap: 1500, dmg: 6,  n: 1, burstGap: 0,   spread: 0.05, speed: 55, range: 40 },
+  smg:      { w: 20, gap: 2100, dmg: 3,  n: 4, burstGap: 90,  spread: 0.09, speed: 60, range: 28 },
+  rifle:    { w: 16, gap: 2200, dmg: 4,  n: 3, burstGap: 110, spread: 0.07, speed: 65, range: 36 },
+  shotgun:  { w: 12, gap: 2400, dmg: 3,  n: 1, burstGap: 0,   spread: 0.04, speed: 50, range: 16, pellets: 5 },
+  revolver: { w: 9,  gap: 2300, dmg: 11, n: 1, burstGap: 0,   spread: 0.05, speed: 70, range: 36 },
+  marksman: { w: 5,  gap: 2800, dmg: 12, n: 1, burstGap: 0,   spread: 0.02, speed: 80, range: 40 }
+};
+const BOT_GUN_IDS = Object.keys(BOT_GUNS);
+function pickBotWeapon() {   // 重みに比べて、くじ引きで1つ決める
+  let total = 0;
+  for (const id of BOT_GUN_IDS) total += BOT_GUNS[id].w;
+  let r = Math.random() * total;
+  for (const id of BOT_GUN_IDS) { r -= BOT_GUNS[id].w; if (r < 0) return id; }
+  return 'pistol';
+}
+const FX_STEAL_WINDOW_MS = 20 * 1000;   // 倒してから、この時間の間だけ「武器を奪った」と受け付ける
+const FX_SHOT_MAX_PER_SEC = 60;         // 1人が1秒に送れる「撃った知らせ」の数（ミニガン・台座を何台か置いても足りる数）
 const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（クライアントの FX18_SLOW_MUL と同じ）
-const FX_SLOW_MAX_MS = 50000;    // 鈍足の長さの上限（ズル対策）
-const FX_GOD_MAX_DAMAGE = 150;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
+const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
+const FX_GOD_MAX_DAMAGE = 250;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
 const FIELD_HALF = 125;          // Botや箱が出てくる範囲（元のフィールドの半幅）
 const WORLD_HALF = 150;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
@@ -53,7 +82,7 @@ const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上�
 
 // ---------- ブロック（クライアントの⑲）の決まり ----------
 const FX_BLOCK_MAX_TOTAL = 500;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
-const FX_BLOCK_MAX_PER_PLAYER = 550;      // 1人が同時に置いておける数
+const FX_BLOCK_MAX_PER_PLAYER = 420;      // 1人が同時に置いておける数
 const FX_BLOCK_MAX_Y = 120;               // ★クライアントの FX19_MAX_Y と同じ数字に（置ける高さの上限）
 const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半幅 − 2。クライアントと同じ考え方）
 const FX_BLOCK_REACH = 14;                // 置く・壊す時に、サーバーが知っているプレイヤーの位置からこの距離(m)まで（通信の遅れの余裕を含む。ふつうの遊び方は6m）
@@ -131,15 +160,15 @@ let onlineCrates = generateCrateLayout();
 // ==========================================
 const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（クライアントと同じ）
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
-const BOT_UP_BASE = 2.5;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
-const BOT_UP_RATIO = 2.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります 2.7） 
-const BOT_UP_MAX = 90;
-const BOT_KB_MAX = 120;           // 1回の横の吹き飛ばしの上限（ズル対策）
+const BOT_UP_BASE = 3.4;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
+const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
+const BOT_UP_MAX = 25;
+const BOT_KB_MAX = 115;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
   for (let i = 0; i < BOT_COUNT; i++) {
     const p = randomSpot();
-    bots.push({ id: 'bot_' + i, x: p.x, y: BOT_REST_Y, vy: 0, z: p.z, targetX: p.x, targetZ: p.z, health: 100, weaponId: BOT_WEAPONS[i % BOT_WEAPONS.length], lastShot: 0, stunnedUntil: 0, slowUntil: 0 });
+    bots.push({ id: 'bot_' + i, x: p.x, y: BOT_REST_Y, vy: 0, z: p.z, targetX: p.x, targetZ: p.z, health: 100, weaponId: pickBotWeapon(), lastShot: 0, stunnedUntil: 0, slowUntil: 0 });
   }
 }
 initBots();
@@ -147,7 +176,7 @@ function respawnBotLater(bot) {
   setTimeout(() => {
     const p = randomSpot();
     bot.health = 100; bot.x = p.x; bot.z = p.z; bot.y = BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0; bot.slowUntil = 0;
-    bot.weaponId = BOT_WEAPONS[Math.floor(Math.random() * BOT_WEAPONS.length)];
+    bot.weaponId = pickBotWeapon();   // ★復活のたびに、くじ引きで武器が変わる
   }, 6000);
 }
 function clampBotToWorld(bot) {
@@ -210,7 +239,7 @@ setInterval(() => {   // 1秒ごとに、時間がたった箱を閉める／30�
 const FX_MAX_MINES = 8;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
 const FX_MAX_TURRETS = 5;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
 const FX_TURRET_HP = 300;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
-const FX_MAX_HIT_PER_SHOT = 300;   // 1回のダメージの上限（ズル対策）
+const FX_MAX_HIT_PER_SHOT = 320;   // 1回のダメージの上限（ズル対策）
 const fxPlaced = {};               // いま置かれている物（id → 設置物）
 let fxPlacedSeq = 0;
 function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
@@ -372,9 +401,14 @@ io.on('connection', (socket) => {
     p.isGliding = !!d.isGliding; p.isParachuting = !!d.isParachuting;
   });
 
+  let shotWinAt = 0, shotWinN = 0;
   on('shotFired', (d) => {
     if (!d || typeof d !== 'object') return;
-    socket.broadcast.emit('remoteShotFired', d);
+    const t = Date.now();
+    if (t - shotWinAt >= 1000) { shotWinAt = t; shotWinN = 0; }
+    if (++shotWinN > FX_SHOT_MAX_PER_SEC) return;   // 連打しすぎ
+    if (Object.keys(d).length > 40) return;         // 項目が多すぎるものは、変な知らせ
+    socket.broadcast.emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
   });
 
   on('hitPlayer', (d) => {
@@ -402,12 +436,25 @@ io.on('connection', (socket) => {
 
   on('playerDied', (d) => {
     const victim = players[socket.id];
+    if (victim) victim.lastDeath = { at: Date.now(), killerId: (d && d.killerId) || null, weaponId: String(victim.weaponId || ''), used: false };   // ★誰に・何を持っていた時に倒されたか（武器を奪う時に確かめる）
     io.emit('killFeed', {
       victimId: socket.id,
       victimName: victim ? victim.name : '???',
       killerId: (d && d.killerId) || null,
       killerName: (d && d.killerName) || null
     });
+  });
+
+  on('weaponStolen', (d) => {   // 倒した人から「武器を受け取れた」の知らせ → 倒された人の手持ちから、その武器を消させる
+    if (!d || !d.victimId) return;
+    const victim = players[d.victimId], ld = victim && victim.lastDeath;
+    if (!ld || ld.used || ld.killerId !== socket.id) return;        // その人を倒した本人だけ
+    if (Date.now() - ld.at > FX_STEAL_WINDOW_MS) return;             // 倒してから時間がたちすぎ
+    const wid = String(d.weaponId || '').slice(0, 30);
+    if (!wid || wid !== ld.weaponId) return;                         // 倒された時に持っていた武器だけ
+    ld.used = true;                                                  // 1回の死亡につき1回だけ
+    const thief = players[socket.id];
+    io.to(d.victimId).emit('weaponTaken', { weaponId: wid, thiefName: thief ? thief.name : '誰か' });
   });
 
   on('hitBot', (d) => {
@@ -510,7 +557,7 @@ io.on('connection', (socket) => {
     socket.emit('fxNChestGranted', { id: id, rare: chest.rare });    // 開けた本人にだけ「中身をどうぞ」
     io.emit('fxNChestState', { open: fxNChestList() });              // 全員に「開いた」と知らせる
   });
-  
+
   // ---- 設置物（銃台座・地雷）----
   on('fxPlacedSync', () => {
     socket.emit('fxPlacedList', { list: Object.values(fxPlaced).map(fxPlacedInfo) });
@@ -712,6 +759,58 @@ setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重�
   }
 }, 50);
 
+function botFireVolley(bot, gun, targetSid) {   // 1回ぶんの射撃（連射する武器は、間をあけて何発か）
+  for (let k = 0; k < gun.n; k++) {
+    const fire = () => {
+      if (bot.health <= 0) return;                 // 撃っている途中でやられたら、そこでやめる
+      const p = players[targetSid];
+      if (!p || p.health <= 0 || p.y >= TOWER_SAFE_Y) return;
+      botFireBullet(bot, gun, p, targetSid);
+    };
+    if (k === 0) fire(); else setTimeout(fire, k * gun.burstGap);
+  }
+}
+function botFireBullet(bot, gun, p, targetSid) {   // 1発（ショットガンは、見た目の粒を何個か）
+  const bulletSpeed = Math.round(gun.speed * BOT_BULLET_MUL);
+  const dx0 = p.x - bot.x, dy0 = p.y - bot.y, dz0 = p.z - bot.z;
+  const dist = Math.sqrt(dx0 * dx0 + dy0 * dy0 + dz0 * dz0);
+  const travelTime = dist / bulletSpeed;
+  const leadX = p.x + (p.velX || 0) * travelTime * 0.9;
+  const leadZ = p.z + (p.velZ || 0) * travelTime * 0.9;
+  const originX = bot.x, originY = bot.y + 1.3, originZ = bot.z;
+  const tdx = leadX - originX, tdy = (p.y + 0.9) - originY, tdz = leadZ - originZ;
+  const tlen = Math.sqrt(tdx * tdx + tdy * tdy + tdz * tdz) || 1;
+  const aim = (spread) => {
+    let ax = tdx / tlen + (Math.random() - 0.5) * spread, ay = tdy / tlen + (Math.random() - 0.5) * spread, az = tdz / tlen + (Math.random() - 0.5) * spread;
+    const al = Math.sqrt(ax * ax + ay * ay + az * az) || 1;
+    return { x: ax / al, y: ay / al, z: az / al };
+  };
+  const main = aim(gun.spread);
+  io.emit('remoteShotFired', { originX, originY, originZ, dirX: main.x, dirY: main.y, dirZ: main.z, weaponId: bot.weaponId });
+  const pellets = gun.pellets || 1;
+  for (let k = 1; k < pellets; k++) {   // ショットガンの、見た目だけの粒
+    const a2 = aim(gun.spread + 0.1);
+    io.emit('remoteShotFired', { originX, originY, originZ, dirX: a2.x, dirY: a2.y, dirZ: a2.z, weaponId: bot.weaponId });
+  }
+  const bulletTravelMs = Math.min(1800, Math.max(60, travelTime * 1000));
+  setTimeout(() => {
+    const p2 = players[targetSid];
+    if (!p2 || p2.health <= 0) return;
+    const travelSec = bulletTravelMs / 1000;
+    const bulletX = originX + main.x * bulletSpeed * travelSec;
+    const bulletY = originY + main.y * bulletSpeed * travelSec;
+    const bulletZ = originZ + main.z * bulletSpeed * travelSec;
+    const ddx = p2.x - bulletX, ddy = (p2.y - 0.8) - bulletY, ddz = p2.z - bulletZ;
+    const hitDist = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+    if (hitDist < 2.2 && !fxLineBlocked(originX, originY, originZ, p2.x, p2.y - 0.8, p2.z)) {   // ★弾が飛んでいる間にブロックが置かれたら、当たらない
+      let damage = gun.dmg;
+      if (pellets > 1) damage = gun.dmg * Math.round(pellets * Math.max(0, 1 - dist / gun.range));   // ショットガン：近いほど、粒がたくさん当たる
+      damage = Math.round(damage);
+      if (damage > 0) io.to(targetSid).emit('youWereHit', { damage: damage, attackerName: '🤖 Bot', attackerId: null });
+    }
+  }, bulletTravelMs);
+}
+
 setInterval(() => {   // BotのAI（0.2秒ごと）
   const now = Date.now();
   for (const bot of bots) {
@@ -735,40 +834,10 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
         bot.x = moved.x; bot.z = moved.z;
       }
 
-      if (now - bot.lastShot > 1500 && !fxLineBlocked(bot.x, bot.y + 1.3, bot.z, nearest.x, nearest.y + 0.9, nearest.z)) {   // ★ブロックの壁の向こうからは撃ってこない
+      const gun = BOT_GUNS[bot.weaponId] || BOT_GUNS.pistol;   // ★持っている武器ごとに、撃つ間隔・連射・ダメージ・届く距離が違う
+      if (now - bot.lastShot > gun.gap && nearestDist <= gun.range && !fxLineBlocked(bot.x, bot.y + 1.3, bot.z, nearest.x, nearest.y + 0.9, nearest.z)) {   // ★ブロックの壁の向こうからは撃ってこない
         bot.lastShot = now;
-        const bulletSpeed = BOT_WEAPON_SPEED[bot.weaponId] || BOT_SPEED_DEFAULT;
-        const travelTime = nearestDist / bulletSpeed;
-        const leadX = nearest.x + (nearest.velX || 0) * travelTime * 0.9;
-        const leadZ = nearest.z + (nearest.velZ || 0) * travelTime * 0.9;
-
-        const originX = bot.x, originY = bot.y + 1.3, originZ = bot.z;
-        const tdx = leadX - originX, tdy = (nearest.y + 0.9) - originY, tdz = leadZ - originZ;
-        const tlen = Math.sqrt(tdx*tdx + tdy*tdy + tdz*tdz) || 1;
-        const spread = 0.05;
-        let aimX = tdx / tlen + (Math.random() - 0.5) * spread;
-        let aimY = tdy / tlen + (Math.random() - 0.5) * spread;
-        let aimZ = tdz / tlen + (Math.random() - 0.5) * spread;
-        const alen = Math.sqrt(aimX*aimX + aimY*aimY + aimZ*aimZ) || 1;
-        aimX /= alen; aimY /= alen; aimZ /= alen;
-
-        io.emit('remoteShotFired', { originX, originY, originZ, dirX: aimX, dirY: aimY, dirZ: aimZ, weaponId: bot.weaponId });
-
-        const targetSid = nearestSid;
-        const bulletTravelMs = Math.min(1800, Math.max(60, travelTime * 1000));
-        setTimeout(() => {
-          const p2 = players[targetSid];
-          if (!p2 || p2.health <= 0) return;
-          const travelSec = bulletTravelMs / 1000;
-          const bulletX = originX + aimX * bulletSpeed * travelSec;
-          const bulletY = originY + aimY * bulletSpeed * travelSec;
-          const bulletZ = originZ + aimZ * bulletSpeed * travelSec;
-          const ddx = p2.x - bulletX, ddy = (p2.y - 0.8) - bulletY, ddz = p2.z - bulletZ;
-          const hitDist = Math.sqrt(ddx*ddx + ddy*ddy + ddz*ddz);
-          if (hitDist < 2.2 && !fxLineBlocked(originX, originY, originZ, p2.x, p2.y - 0.8, p2.z)) {   // ★弾が飛んでいる間にブロックが置かれたら、当たらない
-            io.to(targetSid).emit('youWereHit', { damage: 6, attackerName: '🤖 Bot', attackerId: null });
-          }
-        }, bulletTravelMs);
+        botFireVolley(bot, gun, nearestSid);
       }
     } else {
       if (Math.hypot(bot.targetX - bot.x, bot.targetZ - bot.z) < 1) {
@@ -787,4 +856,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.10）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.11）起動しました。ポート: ' + PORT));
