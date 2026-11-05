@@ -1,6 +1,12 @@
+
+
+
+
 // ==========================================
+//  server13：コスチューム（羽・キラキラ・頭）の共有（fxCostume）を足した。懸賞金のおしらせ（bountyEvent）は server12 と同じ。それ以外は server11 と同じ
 // KP銃ゲー オンライン対戦サーバー（完成版 ver.11）
 // ==========================================
+// ★このファイルの中身を、Render のサーバーの「ファイル全部」と入れ替えてください（一部だけ直す方式ではありません）
 // ver.11 で増えたもの（server10 から）：
 //  ・オンラインのBotが、確率でいろいろな武器を持つ（ピストル・サブマシンガン・アサルトライフル・ショットガン・リボルバー・マークスマン）
 //     … 武器ごとに「撃つ間隔・連射・1発のダメージ・届く距離」が違います（下の BOT_GUNS を直すと調整できます）。強さは昔のBot（ピストル）と同じくらい。
@@ -41,7 +47,7 @@ const io = new Server(server, { cors: { origin: '*' } });
 
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.11）'));
 
-const SERVER_VERSION = 11;
+const SERVER_VERSION = 13;
 const players = {};
 const BOT_COUNT = 2;
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
@@ -162,7 +168,7 @@ const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（ク�
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
 const BOT_UP_BASE = 3.4;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
-const BOT_UP_MAX = 25;
+const BOT_UP_MAX = 111;
 const BOT_KB_MAX = 115;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
@@ -206,8 +212,8 @@ function fxOpenChestIds() {
 // 箱の番号と場所は、ネザーを作る⑫-B が決めた順番（0番から）です。みんな同じネザーなので、番号も同じになります
 const FX_NCHEST_COUNT = 22;                // ★ネザーの箱の数（⑫-B が作る数）と同じにしてください
 const FX_NCHEST_RARE = [0, 1, 2, 3];       // ★レアチェストの番号（ピラミッドのてっぺん×3・要塞の中央）
-const FX_NCHEST_RESPAWN_MS = 200000;       // ふつうの箱：開けてから、また閉まるまで
-const FX_NCHEST_RARE_RESPAWN_MS = 350000;  // レアチェスト
+const FX_NCHEST_RESPAWN_MS = 150000;       // ふつうの箱：開けてから、また閉まるまで
+const FX_NCHEST_RARE_RESPAWN_MS = 300000;  // レアチェスト
 const fxNChests = [];
 for (let i = 0; i < FX_NCHEST_COUNT; i++) fxNChests.push({ open: false, reopenAt: 0, rare: FX_NCHEST_RARE.indexOf(i) >= 0 });
 function fxNChestList() {   // いま開いている箱：[[番号, また閉まるまでの残りミリ秒], ...]
@@ -237,9 +243,9 @@ setInterval(() => {   // 1秒ごとに、時間がたった箱を閉める／30�
 // 🛠️ 設置物（銃台座・地雷）の管理
 // ==========================================
 const FX_MAX_MINES = 8;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
-const FX_MAX_TURRETS = 5;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
+const FX_MAX_TURRETS = 8;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
 const FX_TURRET_HP = 300;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
-const FX_MAX_HIT_PER_SHOT = 320;   // 1回のダメージの上限（ズル対策）
+const FX_MAX_HIT_PER_SHOT = 1120;   // 1回のダメージの上限（ズル対策）
 const fxPlaced = {};               // いま置かれている物（id → 設置物）
 let fxPlacedSeq = 0;
 function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
@@ -374,7 +380,7 @@ io.on('connection', (socket) => {
       id: (d && d.deviceId) || socket.id,
       name: String((d && d.name) || 'プレイヤー').slice(0, 24),
       x: ONLINE_TOWER.x, y: SPAWN_Y, z: ONLINE_TOWER.z, yaw: 0, pitch: 0,
-      weaponId: 'pistol', health: 100, armor: '0,0,0,0', crouching: false,
+      weaponId: 'pistol', health: 100, armor: '0,0,0,0', costume: '', crouching: false,
       velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
     };
     console.log('参加:', players[socket.id].name);
@@ -524,6 +530,14 @@ io.on('connection', (socket) => {
     const code = String((d && d.code) || '');
     if (!p || !/^[0-4],[0-4],[0-4],[0-4]$/.test(code)) return;
     p.armor = code;
+  });
+
+  // ---- コスチュームの共有（"wing_angel|aura_star|head_halo" のように「羽|キラキラ|頭」。からっぽは「なし」）----
+  on('fxCostume', (d) => {
+    const p = players[socket.id];
+    const code = String((d && d.code) || '');
+    if (!p || !fxRate(p, 'costume', 1, 4) || !/^[a-z0-9_]{0,24}\|[a-z0-9_]{0,24}\|[a-z0-9_]{0,24}$/.test(code)) return;
+    p.costume = code;
   });
 
   // ---- ハワイの宝箱 ----
@@ -696,6 +710,16 @@ io.on('connection', (socket) => {
     const text = String((d && d.text) || '').slice(0, 200);
     if (!text) return;
     socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
+  });
+
+  // ---- 懸賞金のおしらせ（お金のやりとりは GAS で行う。ここは「知らせを配る」だけ）----
+  on('bountyEvent', (d) => {
+    const p = players[socket.id];
+    if (!p || !d || typeof d !== 'object' || !fxRate(p, 'bounty', 4, 8)) return;
+    const type = d.type === 'claim' ? 'claim' : (d.type === 'place' ? 'place' : '');
+    const target = String(d.target || '').slice(0, 30), amount = Math.floor(Number(d.amount)), total = Math.floor(Number(d.total) || 0);
+    if (!type || !target || !(amount >= 0 && amount <= 100000)) return;
+    socket.broadcast.emit('bountyEvent', { type: type, from: p.name, target: target, amount: amount, total: Math.max(0, Math.min(100000, total)) });
   });
 
   on('chatJoin', (d) => {
