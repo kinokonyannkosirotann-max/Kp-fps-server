@@ -1,8 +1,16 @@
 
 
-
-
 // ==========================================
+//  server14：通信量を減らした版（Render の無料枠は 1か月 5GB。位置の知らせを送りすぎて使い切ったため）。ゲームの動き・見た目は server13 と同じです
+//   ① 位置・Botの知らせ（playersUpdate／botsUpdate）は、「ゲームに入っている人」にだけ送る（今まではチャット用の接続など、全員に送っていた）
+//   ② 前回と同じ内容の時は、3秒に1回だけにする（止まっている人・放置された画面で、ほぼ送らなくなる）。動いている間は、これまで通り 0.1 秒ごと
+//   ③ みんなに送る位置の知らせから、サーバーの中だけで使う項目（速度・時刻・制限用の数字など）を外し、位置を 1cm 単位にそろえた（見た目の差は出ません）
+//   ④ 256バイト以上の知らせは圧縮して送る（perMessageDeflate。ブラウザが自動で元に戻すので、ゲーム側の変更は要りません）
+//   ⑤ 撃った知らせ・当たった点滅なども、ゲームに入っている人にだけ送る
+//   ⑥ ゲームに入った人には、すぐに全員の位置を1回送る（入った直後に、他の人が見えない時間をなくす）
+//  ※ ゲーム側（クライアント）の変更は要りません。server13 のかわりに、このファイル全部を入れ替えるだけです
+//  ※ 通信量の目安：今までの 1/10 以下（人が多いほど差が大きい）
+//
 //  server13：コスチューム（羽・キラキラ・頭）の共有（fxCostume）を足した。懸賞金のおしらせ（bountyEvent）は server12 と同じ。それ以外は server11 と同じ
 // KP銃ゲー オンライン対戦サーバー（完成版 ver.11）
 // ==========================================
@@ -43,12 +51,32 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, {
+  cors: { origin: '*' },
+  perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
+});
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.11）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.14）'));
 
-const SERVER_VERSION = 13;
+const SERVER_VERSION = 14;
 const players = {};
+// ---------- ★ver.14：通信量を減らす道具 ----------
+const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
+const BCAST_KEEPALIVE_MS = 3000;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1 };   // サーバーの中だけで使う項目（みんなには送らない）
+const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
+const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
+function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
+  const out = {};
+  for (const sid of Object.keys(players)) {
+    const p = players[sid], o = {};
+    for (const k of Object.keys(p)) { if (!HIDE_KEYS[k]) o[k] = p[k]; }
+    o.x = round2(p.x); o.y = round2(p.y); o.z = round2(p.z); o.yaw = round3(p.yaw); o.pitch = round3(p.pitch); o.health = round2(p.health);
+    out[sid] = o;
+  }
+  return out;
+}
+function publicBots() { return bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId })); }
 const BOT_COUNT = 2;
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
 // ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
@@ -72,6 +100,7 @@ function pickBotWeapon() {   // 重みに比べて、くじ引きで1つ決め�
   for (const id of BOT_GUN_IDS) { r -= BOT_GUNS[id].w; if (r < 0) return id; }
   return 'pistol';
 }
+
 const FX_STEAL_WINDOW_MS = 20 * 1000;   // 倒してから、この時間の間だけ「武器を奪った」と受け付ける
 const FX_SHOT_MAX_PER_SEC = 60;         // 1人が1秒に送れる「撃った知らせ」の数（ミニガン・台座を何台か置いても足りる数）
 const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（クライアントの FX18_SLOW_MUL と同じ）
@@ -94,6 +123,7 @@ const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半�
 const FX_BLOCK_REACH = 14;                // 置く・壊す時に、サーバーが知っているプレイヤーの位置からこの距離(m)まで（通信の遅れの余裕を含む。ふつうの遊び方は6m）
 const FX_MAP_RESTORE_MS = 30 * 60 * 1000; // ★クライアントの FX19_RESTORE_MS と同じ数字に（壊した建物が元に戻るまでの時間）
 const FX_TOWER_TOP_Y = SPAWN_Y - 2;       // 塔のてっぺんの高さ（この近くの高い所は、ブロックで囲めない）
+
 
 // ---------- 小さな道具 ----------
 function num(v, lo, hi, dflt) {   // 数字として正しければ lo〜hi に収めて返す。変な値は dflt
@@ -168,8 +198,8 @@ const BOT_REST_Y = 1.3;          // 地面に立っている時の高さ（ク�
 const BOT_GRAV = 22;             // 重力（プレイヤーと同じ）
 const BOT_UP_BASE = 3.4;         // 吹き飛ばされた時の上向きの速さ ＝ この数字 ＋ 「横に飛ばした距離(m)」 × BOT_UP_RATIO
 const BOT_UP_RATIO = 1.5;        //   （オフラインのBotと同じ数字。TNTで3.5m飛ばされたBotは、約1.7mの高さまで跳ね上がります）
-const BOT_UP_MAX = 111;
-const BOT_KB_MAX = 115;           // 1回の横の吹き飛ばしの上限（ズル対策）
+const BOT_UP_MAX = 11;
+const BOT_KB_MAX = 15;           // 1回の横の吹き飛ばしの上限（ズル対策）
 const bots = [];
 function initBots() {
   for (let i = 0; i < BOT_COUNT; i++) {
@@ -242,10 +272,10 @@ setInterval(() => {   // 1秒ごとに、時間がたった箱を閉める／30�
 // ==========================================
 // 🛠️ 設置物（銃台座・地雷）の管理
 // ==========================================
-const FX_MAX_MINES = 8;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
-const FX_MAX_TURRETS = 8;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
-const FX_TURRET_HP = 300;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
-const FX_MAX_HIT_PER_SHOT = 1120;   // 1回のダメージの上限（ズル対策）
+const FX_MAX_MINES = 6;            // ★クライアントの数字（FX_MAX_MINES）と同じにしてください
+const FX_MAX_TURRETS = 2;          // ★クライアントの数字（FX_MAX_TURRETS）と同じにしてください
+const FX_TURRET_HP = 200;          // ★クライアントの数字（FX_TURRET_HP）と同じにしてください
+const FX_MAX_HIT_PER_SHOT = 120;   // 1回のダメージの上限（ズル対策）
 const fxPlaced = {};               // いま置かれている物（id → 設置物）
 let fxPlacedSeq = 0;
 function fxPlacedInfo(o) { return { id: o.id, kind: o.kind, ownerId: o.ownerSid, ownerName: o.ownerName, x: o.x, y: o.y, z: o.z, hp: o.hp, gun: o.gun }; }
@@ -384,7 +414,10 @@ io.on('connection', (socket) => {
       velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
     };
     console.log('参加:', players[socket.id].name);
+    socket.join(GAME_ROOM);   // ★ゲームに入った印（これ以降、位置の知らせが届く）
     socket.emit('crateUpdate', onlineCrates);
+    socket.emit('playersUpdate', publicPlayers());   // ★入ってすぐ、全員の位置を1回送る
+    socket.emit('botsUpdate', publicBots());
   });
 
   on('updateState', (d) => {
@@ -414,7 +447,7 @@ io.on('connection', (socket) => {
     if (t - shotWinAt >= 1000) { shotWinAt = t; shotWinN = 0; }
     if (++shotWinN > FX_SHOT_MAX_PER_SEC) return;   // 連打しすぎ
     if (Object.keys(d).length > 40) return;         // 項目が多すぎるものは、変な知らせ
-    socket.broadcast.emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
+    socket.to(GAME_ROOM).emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
   });
 
   on('hitPlayer', (d) => {
@@ -437,7 +470,7 @@ io.on('connection', (socket) => {
       }
     }
     io.to(d.targetId).emit('youWereHit', payload);
-    socket.broadcast.emit('playerHitFlash', { targetId: d.targetId }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
+    socket.to(GAME_ROOM).emit('playerHitFlash', { targetId: d.targetId }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
   });
 
   on('playerDied', (d) => {
@@ -471,7 +504,7 @@ io.on('connection', (socket) => {
     if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
     const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ★ゴッドライフルで撃たれたBotは、しばらく鈍足
     if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
-    socket.broadcast.emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
+    socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
     if (bot.health <= 0) {
       const attacker = players[socket.id];
       io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: attacker ? attacker.name : '???' });
@@ -521,7 +554,7 @@ io.on('connection', (socket) => {
   });
 
   on('meleeSwing', (d) => {
-    socket.broadcast.emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
+    socket.to(GAME_ROOM).emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
 
   // ---- 防具の共有（"3,2,0,1" のような短い文字列。0＝なし、1〜3＝ランク、4＝ネザライト）----
@@ -634,14 +667,14 @@ io.on('connection', (socket) => {
   on('fxTAim', (d) => {   // 台座の頭の向き（他の人の画面で回して見せるため）
     const o = d && fxPlaced[d.id];
     if (!o || o.ownerSid !== socket.id || o.kind !== 'turret' || !Number.isFinite(d.yaw) || !Number.isFinite(d.pitch)) return;
-    socket.broadcast.emit('fxTAimRelay', { id: o.id, yaw: d.yaw, pitch: d.pitch });
+    socket.to(GAME_ROOM).emit('fxTAimRelay', { id: o.id, yaw: d.yaw, pitch: d.pitch });
   });
   on('fxTBotHit', (d) => {   // タレット・地雷がBotに当たった（倒しても、誰にも報酬は出ません）
     if (!players[socket.id] || !d) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
     bot.health -= Math.min(80, Math.max(0, Number(d.damage) || 0));
-    socket.broadcast.emit('botHitFlash', { botId: bot.id });
+    socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id });
     if (bot.health <= 0) {
       io.emit('botKilled', { botId: bot.id, killerId: null, killerName: '🛠️ 設置物' });
       respawnBotLater(bot);
@@ -767,9 +800,15 @@ io.on('connection', (socket) => {
 // ==========================================
 // ⏱️ 定期的な処理
 // ==========================================
-setInterval(() => {   // 全員の位置・Botの位置を配る（0.1秒ごと）
-  io.emit('playersUpdate', players);
-  io.emit('botsUpdate', bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: b.x, y: b.y, z: b.z, weaponId: b.weaponId })));
+let lastPlayersJson = '', lastPlayersAt = 0, lastBotsJson = '', lastBotsAt = 0;
+setInterval(() => {   // ゲームに入っている人にだけ、全員の位置・Botの位置を配る（0.1秒ごと）。前回と同じ内容なら、3秒に1回だけ
+  const room = io.sockets.adapter.rooms.get(GAME_ROOM);
+  if (!room || room.size === 0) return;   // 誰もゲームに入っていなければ、何も送らない
+  const now = Date.now();
+  const pl = publicPlayers(), ps = JSON.stringify(pl);
+  if (ps !== lastPlayersJson || now - lastPlayersAt >= BCAST_KEEPALIVE_MS) { lastPlayersJson = ps; lastPlayersAt = now; io.to(GAME_ROOM).emit('playersUpdate', pl); }
+  const bl = publicBots(), bs = JSON.stringify(bl);
+  if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(GAME_ROOM).emit('botsUpdate', bl); }
 }, 100);
 
 setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重力で落ちてくる）
@@ -810,11 +849,11 @@ function botFireBullet(bot, gun, p, targetSid) {   // 1発（ショットガン�
     return { x: ax / al, y: ay / al, z: az / al };
   };
   const main = aim(gun.spread);
-  io.emit('remoteShotFired', { originX, originY, originZ, dirX: main.x, dirY: main.y, dirZ: main.z, weaponId: bot.weaponId });
+  io.to(GAME_ROOM).emit('remoteShotFired', { originX, originY, originZ, dirX: main.x, dirY: main.y, dirZ: main.z, weaponId: bot.weaponId });
   const pellets = gun.pellets || 1;
   for (let k = 1; k < pellets; k++) {   // ショットガンの、見た目だけの粒
     const a2 = aim(gun.spread + 0.1);
-    io.emit('remoteShotFired', { originX, originY, originZ, dirX: a2.x, dirY: a2.y, dirZ: a2.z, weaponId: bot.weaponId });
+    io.to(GAME_ROOM).emit('remoteShotFired', { originX, originY, originZ, dirX: a2.x, dirY: a2.y, dirZ: a2.z, weaponId: bot.weaponId });
   }
   const bulletTravelMs = Math.min(1800, Math.max(60, travelTime * 1000));
   setTimeout(() => {
@@ -880,4 +919,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.11）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.14）起動しました。ポート: ' + PORT));
