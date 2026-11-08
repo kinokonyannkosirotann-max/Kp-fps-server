@@ -530,6 +530,38 @@ io.on('connection', (socket) => {
     }, 30000);
   });
 
+  /*
+============================================================
+FPSチーム機能 -
+============================================================
+*/
+
+// 同じFPSサーバーに現在接続しているチームメンバーを返す。
+// GASの「FPSチーム」シートが所属情報の正本、ここはオンライン状態だけを担当する。
+on('teamPresence', (d) => {
+  const ids = Array.isArray(d && d.ids)
+    ? d.ids.map(v => String(v || '').trim()).filter(Boolean).slice(0, 8)
+    : [];
+
+  const onlineIds = [];
+  const onlineNames = {};
+  for (const sid of Object.keys(players)) {
+    const player = players[sid];
+    if (!player || !player.id) continue;
+    const playerId = String(player.id).trim();
+    if (ids.includes(playerId)) {
+      onlineIds.push(playerId);
+      onlineNames[playerId] = String(player.name || 'プレイヤー');
+    }
+  }
+
+  socket.emit('teamPresenceResult', {
+    requestId: String((d && d.requestId) || ''),
+    onlineIds: onlineIds,
+    onlineNames: onlineNames
+  });
+});
+
   on('kickPlayer', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
