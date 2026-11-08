@@ -539,26 +539,26 @@ FPSチーム機能 -
 // 同じFPSサーバーに現在接続しているチームメンバーを返す。
 // GASの「FPSチーム」シートが所属情報の正本、ここはオンライン状態だけを担当する。
 on('teamPresence', (d) => {
-  const ids = Array.isArray(d && d.ids)
-    ? d.ids.map(v => String(v || '').trim()).filter(Boolean).slice(0, 8)
+  const names = Array.isArray(d && d.names)
+    ? d.names.map(v => String(v || '').trim()).filter(Boolean).slice(0, 8)
     : [];
 
-  const onlineIds = [];
-  const onlineNames = {};
+  const wanted = new Set(names.map(v => v.toLowerCase()));
+  const onlineNames = new Set();
+
   for (const sid of Object.keys(players)) {
     const player = players[sid];
-    if (!player || !player.id) continue;
-    const playerId = String(player.id).trim();
-    if (ids.includes(playerId)) {
-      onlineIds.push(playerId);
-      onlineNames[playerId] = String(player.name || 'プレイヤー');
+    if (!player || !player.name) continue;
+
+    const playerName = String(player.name).trim();
+    if (wanted.has(playerName.toLowerCase())) {
+      onlineNames.add(playerName);
     }
   }
 
   socket.emit('teamPresenceResult', {
     requestId: String((d && d.requestId) || ''),
-    onlineIds: onlineIds,
-    onlineNames: onlineNames
+    onlineNames: Array.from(onlineNames)
   });
 });
 
