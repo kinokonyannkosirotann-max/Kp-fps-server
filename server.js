@@ -1,5 +1,12 @@
 
 // ==========================================
+//  server15：ドロップアイテム対応版（クライアントの ㉑ fx21 と組み合わせて使います。通信量を減らした server14 の内容も、そのまま入っています）
+//   ① やられた人の持ち物・ゴミ箱で捨てた物・こわした箱の中身が、地面に落ちて、みんなの画面に出る（150秒たつと消える）
+//   ② 先に近づいた1人だけが拾える（同時に拾っても、サーバーが1人にだけ渡す）
+//   ③ 落とした武器をほかの人に拾われたら、落とした人に「拾われた」と知らせる（チェストからも消える処理は、クライアントの fxfix3 が行います）
+//   ④ ゲームに入った人には、いま落ちている物をぜんぶ教える
+//   ※ 古いクライアントのままでも、ゲームは今まで通り動きます（落とし物が見えないだけ）
+//
 //  server14：通信量を減らした版（Render の無料枠は 1か月 5GB。位置の知らせを送りすぎて使い切ったため）。ゲームの動き・見た目は server13 と同じです
 //   ① 位置・Botの知らせ（playersUpdate／botsUpdate）は、「ゲームに入っている人」にだけ送る（今まではチャット用の接続など、全員に送っていた）
 //   ② 前回と同じ内容の時は、3秒に1回だけにする（止まっている人・放置された画面で、ほぼ送らなくなる）。動いている間は、これまで通り 0.1 秒ごと
@@ -54,9 +61,9 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.14）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.15）'));
 
-const SERVER_VERSION = 14;
+const SERVER_VERSION = 15;
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
@@ -397,11 +404,39 @@ function fxLineBlocked(ax, ay, az, bx, by, bz) {   // 2点の間（弾の通り�
   return false;
 }
 
+// ---------- ★ver.15：ドロップアイテム（地面に落ちている物。ゲームに入っている全員の画面に出る） ----------
+const FX_DROP_LIFETIME_MS = 150 * 1000;   // 落ちている時間（★クライアントの FX21_LIFETIME_S と同じ数字に）
+const FX_DROP_MAX = 400;                  // 地面に落ちていられる合計（超えたら古い物から消える）
+const FX_DROP_PER_EVENT = 60;             // 1回の知らせで落とせる数
+const FX_DROP_PICK_REACH = 8;             // 拾う時：サーバーが知っている位置から、この距離(m)まで（通信の遅れの余裕を含む）
+const FX_DROP_ID_RE = /^[a-z0-9_]{1,32}$/;
+const fxDrops = new Map();                // 番号 → 落とし物
+let fxDropSeq = 0;
+function fxDropPublic(r) { return { did: r.did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at, x: r.x, y: r.y, z: r.z, s: r.s, src: r.src, rare: r.rare }; }
+function fxDropClean(d, src, sid) {   // クライアントから来た落とし物を点検して、正しい形にする（変なものは null）
+  if (!d || typeof d !== 'object') return null;
+  const k = String(d.k || ''), id = String(d.id || '');
+  if (k !== 'w' && k !== 'i' && k !== 'a' && k !== 'm') return null;
+  if (!FX_DROP_ID_RE.test(id)) return null;
+  const x = Number(d.x), y = Number(d.y), z = Number(d.z);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+  if (Math.abs(x) > 1000 || Math.abs(z) > 1000 || y < -60 || y > NETHER_Y + 300) return null;
+  return {
+    did: 0, k: k, id: id, n: Math.round(num(d.n, 1, 99, 1)), am: Math.round(num(d.am, 0, 9999, 0)), at: d.at === 'omni' ? 'omni' : '',
+    x: Math.round(x * 100) / 100, y: Math.round(y * 100) / 100, z: Math.round(z * 100) / 100, s: sid, src: src, rare: d.rare ? 1 : 0, born: Date.now()
+  };
+}
+function fxDropMakeRoom(n) {   // 入りきらない時は、古い物から消す
+  const gone = [];
+  while (fxDrops.size + n > FX_DROP_MAX && fxDrops.size > 0) { const first = fxDrops.keys().next().value; fxDrops.delete(first); gone.push(first); }
+  if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
+}
+
 io.on('connection', (socket) => {
   const on = function (ev, fn) { socket.on(ev, guard(ev, fn)); };
 
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
-  socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS });   // blocks＝ブロック対応
+  socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
 
   on('join', (d) => {
     players[socket.id] = {
@@ -416,6 +451,7 @@ io.on('connection', (socket) => {
     socket.emit('crateUpdate', onlineCrates);
     socket.emit('playersUpdate', publicPlayers());   // ★入ってすぐ、全員の位置を1回送る
     socket.emit('botsUpdate', publicBots());
+    if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });   // ★いま落ちている物
   });
 
   on('updateState', (d) => {
@@ -494,6 +530,32 @@ io.on('connection', (socket) => {
     io.to(d.victimId).emit('weaponTaken', { weaponId: wid, thiefName: thief ? thief.name : '誰か' });
   });
 
+  on('fxDropSpawn', (d) => {   // ★落とし物を出す（やられた時・ゴミ箱・箱をこわした時）
+    const p = players[socket.id];
+    if (!p || !d || !Array.isArray(d.list) || !fxRate(p, 'dropSpawn', 3, 8)) return;
+    const src = (d.src === 'death' || d.src === 'crate') ? d.src : 'trash';
+    const recs = [];
+    for (let i = 0; i < d.list.length && i < FX_DROP_PER_EVENT; i++) { const r = fxDropClean(d.list[i], src, socket.id); if (r) recs.push(r); }
+    if (!recs.length) return;
+    fxDropMakeRoom(recs.length);
+    const pub = recs.map((r) => { r.did = ++fxDropSeq; fxDrops.set(r.did, r); return fxDropPublic(r); });
+    io.to(GAME_ROOM).emit('fxDropAdd', { list: pub });
+  });
+  on('fxDropPick', (d) => {   // ★拾う（先に届いた1人だけが拾える）
+    const p = players[socket.id];
+    const did = d && d.did;
+    if (!p || !Number.isInteger(did) || !fxRate(p, 'dropPick', 10, 14)) return;
+    const r = fxDrops.get(did);
+    if (!r) return;
+    if (Math.hypot(p.x - r.x, p.z - r.z) > FX_DROP_PICK_REACH || Math.abs(p.y - r.y) > FX_DROP_PICK_REACH + 4) return;   // 遠すぎる
+    fxDrops.delete(did);
+    io.to(GAME_ROOM).emit('fxDropGone', { ids: [did] });
+    socket.emit('fxDropGot', { did: did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at });
+    if (r.src === 'death' && r.k === 'w' && r.s !== socket.id && players[r.s]) {   // 倒された人が落とした武器を、ほかの人が拾った → 落とした人に知らせる
+      io.to(r.s).emit('weaponTaken', { weaponId: r.id, thiefName: p.name, fx21: true });
+    }
+  });
+
   on('hitBot', (d) => {
     if (!d) return;
     const bot = bots.find(b => b.id === d.botId);
@@ -529,38 +591,6 @@ io.on('connection', (socket) => {
       io.emit('crateUpdate', onlineCrates);
     }, 30000);
   });
-
-  /*
-============================================================
-FPSチーム機能 -
-============================================================
-*/
-
-// 同じFPSサーバーに現在接続しているチームメンバーを返す。
-// GASの「FPSチーム」シートが所属情報の正本、ここはオンライン状態だけを担当する。
-on('teamPresence', (d) => {
-  const names = Array.isArray(d && d.names)
-    ? d.names.map(v => String(v || '').trim()).filter(Boolean).slice(0, 8)
-    : [];
-
-  const wanted = new Set(names.map(v => v.toLowerCase()));
-  const onlineNames = new Set();
-
-  for (const sid of Object.keys(players)) {
-    const player = players[sid];
-    if (!player || !player.name) continue;
-
-    const playerName = String(player.name).trim();
-    if (wanted.has(playerName.toLowerCase())) {
-      onlineNames.add(playerName);
-    }
-  }
-
-  socket.emit('teamPresenceResult', {
-    requestId: String((d && d.requestId) || ''),
-    onlineNames: Array.from(onlineNames)
-  });
-});
 
   on('kickPlayer', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
@@ -817,7 +847,7 @@ on('teamPresence', (d) => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
-    if (Object.keys(players).length === 0) fxBlocksResetAll();   // ★誰もいなくなったら、ブロックも壊れた建物も、はじめに戻す
+    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); }   // ★誰もいなくなったら、ブロックも壊れた建物も、はじめに戻す
     for (const id of Object.keys(fxPlaced)) {
       if (fxPlaced[id].ownerSid === socket.id) { delete fxPlaced[id]; io.emit('fxPlacedRemove', { id: id, reason: 'left' }); }
     }
@@ -840,6 +870,13 @@ setInterval(() => {   // ゲームに入っている人にだけ、全員の位�
   const bl = publicBots(), bs = JSON.stringify(bl);
   if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(GAME_ROOM).emit('botsUpdate', bl); }
 }, 100);
+
+setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える）
+  if (fxDrops.size === 0) return;
+  const now = Date.now(), gone = [];
+  for (const [did, r] of fxDrops) { if (now - r.born >= FX_DROP_LIFETIME_MS) { fxDrops.delete(did); gone.push(did); } }
+  if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
+}, 5000);
 
 setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重力で落ちてくる）
   const dt = 0.05;
@@ -949,4 +986,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.14）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.15）起動しました。ポート: ' + PORT));
