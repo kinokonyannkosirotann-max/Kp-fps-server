@@ -69,7 +69,7 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const SERVER_VERSION = 16;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbx2iBZmF9m3cmEn2yWRpv5uq3icsUcz_Yjife5Only81OlbrfSqh9yVHShv9_SaYq0/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxZB7YWboOmNoieH4WpyxyBgs8VZuL9zKjV_q-eDSGxvEOaMVL-7qEm6bWLniq_bpk/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();       // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 let fxBanBusyUntil = 0;               // BANの演出は、同時に1つだけ
