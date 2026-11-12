@@ -83,16 +83,21 @@ async function fxGasPost(obj) {
   } catch (e) { console.error('[GAS]', e && e.message); return null; }
   finally { if (tm) clearTimeout(tm); }
 }
-async function fxIsOwnerId(deviceId, fresh) {
+// ★ver.17：本人確認（GAS に「そのIDは登録済みか・BANされていないか・正しい名前は何か」を聞く）
+const FX_BAD_NAMES = ['プレイヤー', 'ユーザー', 'ゲスト', 'player', 'user', 'guest', '???'];   // GAS が古くて確認できない時だけ使う
+async function fxIdentity(deviceId, fresh) {
   const id = String(deviceId || '').trim();
-  if (!id || !GAS_URL) return false;
+  if (!id || !GAS_URL) return null;
   const c = fxOwnerCache.get(id), now = Date.now();
-  if (c && now - c.at < 30000 && !(fresh && c.owner)) return c.owner;   // Ownerの人が何かする時だけ、毎回ほんとうに確かめる
+  if (c && c.info && now - c.at < 30000 && !(fresh && c.info.owner)) return c.info;
   const j = await fxGasPost({ action: 'fpsOwnerCheck', id: id });
-  const ok = !!(j && j.status === 'success' && j.owner === true);
-  fxOwnerCache.set(id, { owner: ok, at: now });
-  return ok;
+  if (!j || j.status !== 'success') return null;   // 聞けなかった時は記憶しない
+  const info = { verified: typeof j.exists === 'boolean', owner: j.owner === true, exists: j.exists === true, name: String(j.name || ''), banned: j.banned === true, banReason: String(j.banReason || '') };
+  fxOwnerCache.set(id, { info: info, at: now });
+  return info;
 }
+async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceId, fresh); return !!(i && i.owner); }
+
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
@@ -462,9 +467,16 @@ function fxDropMakeRoom(n) {   // 入りきらない時は、古い物から消�
   if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
 }
 
-io.on('connection', (socket) => {
-  const on = function (ev, fn) { socket.on(ev, guard(ev, fn)); };
+const FX_PRE_JOIN_OK = { join: 1, disconnect: 1, fxOwnerAsk: 1, chatJoin: 1, dmMessage: 1, groupMessage: 1, fxChestSync: 1, fxNChestSync: 1, fxPlacedSync: 1, fxBlockSync: 1 };   // 本人確認の前でも使えるもの（チャット専用の接続・読むだけの同期）
 
+io.on('connection', (socket) => {
+  const on = function (ev, fn) {
+    socket.on(ev, guard(ev, function () {
+      if (!FX_PRE_JOIN_OK[ev] && !players[socket.id]) return;   // ★ゲームに入っていない（本人確認が済んでいない）接続は、何もできない
+      return fn.apply(this, arguments);
+    }));
+  };
+  
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
 
@@ -479,21 +491,47 @@ io.on('connection', (socket) => {
   }
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
+    let joining = false, joinTries = 0;
   on('join', (d) => {
-    players[socket.id] = {
-      id: (d && d.deviceId) || socket.id,
-      name: String((d && d.name) || 'プレイヤー').slice(0, 24),
-      x: ONLINE_TOWER.x, y: SPAWN_Y, z: ONLINE_TOWER.z, yaw: 0, pitch: 0,
-      weaponId: 'pistol', health: 100, armor: '0,0,0,0', costume: '', crouching: false,
-      velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
-    };
-    console.log('参加:', players[socket.id].name);
-    socket.join(GAME_ROOM);   // ★ゲームに入った印（これ以降、位置の知らせが届く）
-    fxOwnerRefresh(false).catch(() => {});   // ★Owner かどうか（/kick・BAN杖の許可）
-    socket.emit('crateUpdate', onlineCrates);
-    socket.emit('playersUpdate', publicPlayers());   // ★入ってすぐ、全員の位置を1回送る
-    socket.emit('botsUpdate', publicBots());
-    if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });   // ★いま落ちている物
+    if (players[socket.id] || joining) return;
+    if (++joinTries > 8) return;   // 何度も入りなおそうとする接続は無視
+    const rawId = (d && typeof d.deviceId === 'string') ? d.deviceId.trim() : '';
+    const rawName = String((d && d.name) || '').trim();
+    const deny = (why, msg) => { joining = false; socket.emit('fxJoinDenied', { why: why, msg: msg }); };
+    if (rawId.length < 8 || rawId.length > 80 || rawId === socket.id) { deny('noid', 'アカウント情報の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
+    if (!rawName) { deny('noname', '名前の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
+    joining = true;
+    (async () => {
+      let name = rawName.slice(0, 24);
+      let info = null;
+      if (GAS_URL) {
+        info = await fxIdentity(rawId, false);
+        if (!socket.connected) { joining = false; return; }
+        if (!info) { deny('busy', '本人確認のサーバーにつながりません'); return; }
+      }
+      if (info && info.verified) {
+        if (!info.exists) { deny('unregistered', 'このアカウントは登録されていません。トップ画面で登録してから入ってください'); return; }
+        if (info.banned) { deny('banned', 'このアカウントは利用が制限されています' + (info.banReason ? '（' + info.banReason + '）' : '')); return; }
+        if (!info.name) { deny('noname', 'アカウントの名前を確認できません'); return; }
+        name = info.name.slice(0, 24);   // ★名前は、登録されている名前を使う（画面から送られた名前は使わない）
+      } else if (FX_BAD_NAMES.indexOf(name.toLowerCase()) >= 0) { deny('noname', '名前が読み込まれていません'); return; }
+      if (players[socket.id] || !socket.connected) { joining = false; return; }
+      joining = false;
+      players[socket.id] = {
+        id: rawId,
+        name: name,
+        x: ONLINE_TOWER.x, y: SPAWN_Y, z: ONLINE_TOWER.z, yaw: 0, pitch: 0,
+        weaponId: 'pistol', health: 100, armor: '0,0,0,0', costume: '', crouching: false,
+        velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
+      };
+      console.log('参加:', name);
+      socket.join(GAME_ROOM);
+      fxOwnerRefresh(false).catch(() => {});   // さっきの確認の記憶を使うので、GASにはもう聞かない
+      socket.emit('crateUpdate', onlineCrates);
+      socket.emit('playersUpdate', publicPlayers());
+      socket.emit('botsUpdate', publicBots());
+      if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });
+    })().catch((e) => { console.error('[join]', e && e.message); deny('busy', '本人確認でエラーが出ました'); });
   });
 
   on('updateState', (d) => {
@@ -647,6 +685,26 @@ io.on('connection', (socket) => {
     })().catch((e) => console.error('[kick]', e && e.message));
   });
 
+  on('fxDeviceIdAsk', (d) => {   // ★Owner だけ：ユーザー名から DeviceID を調べる。答えは、聞いた本人にだけ返す（ほかの人には送らない）
+    const me = players[socket.id];
+    const name = String((d && d.targetName) || '').trim().slice(0, 40);
+    if (!me || !name) return;
+    const reply = (o) => socket.emit('fxDeviceIdResult', o);
+    if (!fxRate(me, 'devid', 0.5, 3)) { reply({ ok: false, msg: '少しゆっくり使ってください' }); return; }
+    (async () => {
+      if (!(await fxOwnerRefresh(true))) { reply({ ok: false, msg: 'Owner だけが使えます' }); return; }   // 毎回、GASでほんとうに確かめる
+      const low = name.toLowerCase();
+      const sids = Object.keys(players).filter((s) => String(players[s].name).toLowerCase() === low);
+      if (sids.length === 1) { const t = players[sids[0]]; reply({ ok: true, name: t.name, deviceId: String(t.id), online: true }); return; }   // オンラインの人は、サーバーの記憶から（GASに聞かない）
+      if (sids.length > 1) { reply({ ok: false, msg: '同じ名前の人が複数います' }); return; }
+      const mine = players[socket.id];
+      if (!mine) return;
+      const j = await fxGasPost({ action: 'fpsOwnerWhoIs', id: mine.id, targetName: name });   // オフラインの人は GAS に聞く（GAS側でもOwnerを確認）
+      if (j && j.status === 'success' && j.targetId) reply({ ok: true, name: String(j.name || name), deviceId: String(j.targetId), online: false });
+      else reply({ ok: false, msg: (j && j.msg) || 'GAS につながりません' });
+    })().catch((e) => { console.error('[deviceid]', e && e.message); reply({ ok: false, msg: 'エラーが出ました' }); });
+  });
+  
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
   on('fxBanRequest', (d) => {
     if (!d || !players[socket.id]) return;
