@@ -1,5 +1,8 @@
-
 // ==========================================
+//  server16：Owner専用の /kick ＋ BAN杖に対応。★重要：今までは、全員の画面に「アカウントのID」が配られていました（IDが分かるとなりすませます）→ 配らないようにしました
+//   ・上のほうの GAS_URL に、GAS のウェブアプリURLを入れてください（空だと、/kick も BAN杖も、だれも使えません）
+//   ・GAS 側にも「ownerToolsEntry_」の追加が要ります（別ファイル）
+//
 //  server15：ドロップアイテム対応版（クライアントの ㉑ fx21 と組み合わせて使います。通信量を減らした server14 の内容も、そのまま入っています）
 //   ① やられた人の持ち物・ゴミ箱で捨てた物・こわした箱の中身が、地面に落ちて、みんなの画面に出る（150秒たつと消える）
 //   ② 先に近づいた1人だけが拾える（同時に拾っても、サーバーが1人にだけ渡す）
@@ -61,14 +64,40 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.15）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.16）'));
 
-const SERVER_VERSION = 15;
+const SERVER_VERSION = 16;
+
+// ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbx2iBZmF9m3cmEn2yWRpv5uq3icsUcz_Yjife5Only81OlbrfSqh9yVHShv9_SaYq0/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
+const fxOwnerCache = new Map();       // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
+let fxBanBusyUntil = 0;               // BANの演出は、同時に1つだけ
+async function fxGasPost(obj) {
+  if (!GAS_URL || typeof fetch !== 'function') return null;
+  const ac = (typeof AbortController === 'function') ? new AbortController() : null;
+  const tm = ac ? setTimeout(() => { try { ac.abort(); } catch (e) {} }, 12000) : null;
+  try {
+    const r = await fetch(GAS_URL, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify(obj), redirect: 'follow', signal: ac ? ac.signal : undefined });
+    return await r.json();
+  } catch (e) { console.error('[GAS]', e && e.message); return null; }
+  finally { if (tm) clearTimeout(tm); }
+}
+async function fxIsOwnerId(deviceId, fresh) {
+  const id = String(deviceId || '').trim();
+  if (!id || !GAS_URL) return false;
+  const c = fxOwnerCache.get(id), now = Date.now();
+  if (c && now - c.at < 30000 && !(fresh && c.owner)) return c.owner;   // Ownerの人が何かする時だけ、毎回ほんとうに確かめる
+  const j = await fxGasPost({ action: 'fpsOwnerCheck', id: id });
+  const ok = !!(j && j.status === 'success' && j.owner === true);
+  fxOwnerCache.set(id, { owner: ok, at: now });
+  return ok;
+}
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
 const BCAST_KEEPALIVE_MS = 3000;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
-const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1 };   // サーバーの中だけで使う項目（みんなには送らない）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1 };   // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
 function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
@@ -128,6 +157,7 @@ const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半�
 const FX_BLOCK_REACH = 14;                // 置く・壊す時に、サーバーが知っているプレイヤーの位置からこの距離(m)まで（通信の遅れの余裕を含む。ふつうの遊び方は6m）
 const FX_MAP_RESTORE_MS = 30 * 60 * 1000; // ★クライアントの FX19_RESTORE_MS と同じ数字に（壊した建物が元に戻るまでの時間）
 const FX_TOWER_TOP_Y = SPAWN_Y - 2;       // 塔のてっぺんの高さ（この近くの高い所は、ブロックで囲めない）
+
 
 
 // ---------- 小さな道具 ----------
@@ -438,6 +468,17 @@ io.on('connection', (socket) => {
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
 
+  async function fxOwnerRefresh(fresh) {   // いまこの接続の人が Owner かを、GASで確かめて、本人に知らせる
+    const p = players[socket.id];
+    if (!p) return false;
+    const ok = await fxIsOwnerId(p.id, fresh);
+    const q = players[socket.id];
+    if (q) q.owner = ok;
+    socket.emit('fxOwner', { owner: ok });
+    return ok;
+  }
+  on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
+
   on('join', (d) => {
     players[socket.id] = {
       id: (d && d.deviceId) || socket.id,
@@ -448,6 +489,7 @@ io.on('connection', (socket) => {
     };
     console.log('参加:', players[socket.id].name);
     socket.join(GAME_ROOM);   // ★ゲームに入った印（これ以降、位置の知らせが届く）
+    fxOwnerRefresh(false).catch(() => {});   // ★Owner かどうか（/kick・BAN杖の許可）
     socket.emit('crateUpdate', onlineCrates);
     socket.emit('playersUpdate', publicPlayers());   // ★入ってすぐ、全員の位置を1回送る
     socket.emit('botsUpdate', publicBots());
@@ -457,6 +499,7 @@ io.on('connection', (socket) => {
   on('updateState', (d) => {
     const p = players[socket.id];
     if (!p || !d) return;
+    if (p.banLock && Date.now() < p.banLock) return;   // ★BANの演出中の人は、動かせない（位置を変えない）
     const x = Number(d.x), y = Number(d.y), z = Number(d.z), yaw = Number(d.yaw);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(yaw)) return;   // おかしな数字は無視
     const now = Date.now();
@@ -493,7 +536,6 @@ io.on('connection', (socket) => {
       payload.kbForce = num(d.kbForce, 0, 30, 6); payload.kbVertical = !!d.kbVertical;
     }
     if (d.stunMs) payload.stunMs = num(d.stunMs, 0, 6000, 0);
-    
     if (d.weaponId === 'godrifle' && attacker) {   // ★ゴッドライフル：防具無視（pierce）と鈍足（slowMs）を、撃たれた相手に伝える（ほかの武器が送ってきても無視）
       payload.damage = Math.min(payload.damage, FX_GOD_MAX_DAMAGE);
       const nowG = Date.now();
@@ -561,28 +603,8 @@ io.on('connection', (socket) => {
     if (!d) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
-    //bot.health -= num(d.damage, 0, 250, 0);
-    //if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
-
-//置き換え
-    
-    const hitDamage = d.weaponId === 'la_piece'
-      ? num(d.damage, 0, 65, 0)
-      : num(d.damage, 0, 250, 0);
-
-    bot.health -= hitDamage;
-
-    if (d.weaponId === 'la_piece') {
-      bot.stunnedUntil = Math.max(
-        bot.stunnedUntil || 0,
-        Date.now() + 1400
-      );
-    } else if (d.stunMs) {
-      bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
-    }
-//置き換え
-
-    
+    bot.health -= num(d.damage, 0, 250, 0);
+    if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
     const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ★ゴッドライフルで撃たれたBotは、しばらく鈍足
     if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
     socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
@@ -613,14 +635,47 @@ io.on('connection', (socket) => {
     }, 30000);
   });
 
-  on('kickPlayer', (d) => {
+  on('kickPlayer', (d) => {   // ★Owner だけ
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
-    const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
-    if (targetSid) {
+    (async () => {
+      if (!(await fxOwnerRefresh(true))) return;
+      const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
+      if (!targetSid || targetSid === socket.id) return;
       io.to(targetSid).emit('youWereKicked', {});
       const s = io.sockets.sockets.get(targetSid);
       if (s) s.disconnect(true);
-    }
+    })().catch((e) => console.error('[kick]', e && e.message));
+  });
+
+  // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
+  on('fxBanRequest', (d) => {
+    if (!d || !players[socket.id]) return;
+    const reply = (ok, msg) => socket.emit('fxBanResult', { ok: ok, msg: msg });
+    const now = Date.now();
+    if (fxBanBusyUntil > now) { reply(false, '別のBANの演出中です。少し待ってください'); return; }
+    let tsid = (d.targetId && players[String(d.targetId)]) ? String(d.targetId) : null;
+    if (!tsid) { const q = String(d.targetName || '').trim().toLowerCase(); tsid = Object.keys(players).find(s => players[s].name.toLowerCase() === q) || null; }
+    if (!tsid) { reply(false, 'その人は、もうオンラインにいません'); return; }
+    if (tsid === socket.id) { reply(false, '自分はBANできません'); return; }
+    const reason = String(d.reason || '').replace(/[\[\]()'"\r\n]/g, '').trim().slice(0, 60);
+    const minutes = Math.max(0, Math.min(2628000, Math.floor(Number(d.minutes) || 0)));
+    fxBanBusyUntil = now + FX_BAN_SHOW_MS + 8000;
+    (async () => {
+      const me = players[socket.id];
+      if (!me || !(await fxOwnerRefresh(true))) { fxBanBusyUntil = 0; reply(false, 'Owner だけが使えます'); return; }
+      const t = players[tsid];
+      if (!t) { fxBanBusyUntil = 0; reply(false, 'その人は、もうオンラインにいません'); return; }
+      const j = await fxGasPost({ action: 'fpsOwnerBan', id: me.id, targetId: t.id, reason: reason, minutes: minutes });
+      if (!j || j.status !== 'success') { fxBanBusyUntil = 0; reply(false, (j && j.msg) || 'GAS につながりません（GAS_URL を確かめてください）'); return; }
+      fxOwnerCache.delete(String(t.id).trim());
+      const pos = { x: t.x, y: t.y, z: t.z };
+      t.banLock = Date.now() + FX_BAN_SHOW_MS + 7000;
+      io.to(GAME_ROOM).emit('fxBanStart', { ownerSid: socket.id, ownerName: me.name, targetSid: tsid, targetName: t.name, x: pos.x, y: pos.y, z: pos.z, ms: FX_BAN_SHOW_MS, perm: minutes === 0 });
+      reply(true, 'BANしました：' + t.name + (minutes ? '（' + minutes + '分）' : '（無期限）'));
+      setTimeout(() => { io.to(GAME_ROOM).emit('fxBanSlam', { ownerSid: socket.id, targetSid: tsid, x: pos.x, y: pos.y, z: pos.z }); }, FX_BAN_SHOW_MS);
+      setTimeout(() => { io.to(tsid).emit('fxBanKill', {}); }, FX_BAN_SHOW_MS + 600);
+      setTimeout(() => { const s = io.sockets.sockets.get(tsid); if (s) s.disconnect(true); }, FX_BAN_SHOW_MS + 3600);
+    })().catch((e) => { fxBanBusyUntil = 0; console.error('[ban]', e && e.message); reply(false, 'エラーが出ました'); });
   });
 
   on('grantOrbital', (d) => {
@@ -761,8 +816,6 @@ io.on('connection', (socket) => {
       respawnBotLater(bot);
     }
   });
-
-
 
   // ---- ブロック（⑲）：置く・壊す・爆発で壊れる／マップの建物を壊す ----
   on('fxBlockSync', () => {   // いまの全部を教えて（参加した時・つなぎ直した時・食い違った時）
