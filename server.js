@@ -71,7 +71,9 @@ const SERVER_VERSION = 16;
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxZB7YWboOmNoieH4WpyxyBgs8VZuL9zKjV_q-eDSGxvEOaMVL-7qEm6bWLniq_bpk/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
-const fxOwnerCache = new Map();       // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
+const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
+const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
+function fxNum(v, lim) { v = Number(v); return Number.isFinite(v) ? Math.max(-lim, Math.min(lim, v)) : 0; }
 let fxBanBusyUntil = 0;               // BANの演出は、同時に1つだけ
 async function fxGasPost(obj) {
   if (!GAS_URL || typeof fetch !== 'function') return null;
@@ -685,6 +687,19 @@ io.on('connection', (socket) => {
     })().catch((e) => console.error('[kick]', e && e.message));
   });
 
+  // ---- ★飛行機の同期：位置・向きなどを、ほかの人にそのまま中継する（数字は範囲内に直す） ----
+  let plLastAt = 0;
+  on('plState', (d) => {
+    if (!d || !players[socket.id]) return;
+    const now = Date.now(); if (now - plLastAt < 50) return; plLastAt = now;
+    fxPlaneSids.add(socket.id);
+    socket.to(GAME_ROOM).emit('plRemote', { sid: socket.id, x: fxNum(d.x, 1000), y: fxNum(d.y, 1000), z: fxNum(d.z, 1000), yaw: fxNum(d.yaw, 7), pitch: fxNum(d.pitch, 7), roll: fxNum(d.roll, 7), thr: fxNum(d.thr, 1), eng: d.eng ? 1 : 0, lt: d.lt ? 1 : 0, bm: Math.max(0, Math.min(10, Math.floor(Number(d.bm) || 0))), rd: d.rd ? 1 : 0 });
+  });
+  on('plGone', (d) => {
+    if (!fxPlaneSids.delete(socket.id)) return;
+    socket.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: d && d.boom ? 1 : 0 });
+  });
+  
   on('fxDeviceIdAsk', (d) => {   // ★Owner だけ：ユーザー名から DeviceID を調べる。答えは、聞いた本人にだけ返す（ほかの人には送らない）
     const me = players[socket.id];
     const name = String((d && d.targetName) || '').trim().slice(0, 40);
@@ -979,6 +994,7 @@ io.on('connection', (socket) => {
 
   on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
+        if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
     if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); }   // ★誰もいなくなったら、ブロックも壊れた建物も、はじめに戻す
