@@ -493,6 +493,16 @@ io.on('connection', (socket) => {
       payload.kbForce = num(d.kbForce, 0, 30, 6); payload.kbVertical = !!d.kbVertical;
     }
     if (d.stunMs) payload.stunMs = num(d.stunMs, 0, 6000, 0);
+
+
+    // 🌌 ラ・ピース：神域の一撃
+    if (d.weaponId === 'la_piece') {
+      payload.damage = Math.min(payload.damage, 65);
+      payload.pierce = true;
+      payload.stunMs = Math.max(payload.stunMs || 0, 1400);
+    }
+//ラ・ピース終わり
+    
     if (d.weaponId === 'godrifle' && attacker) {   // ★ゴッドライフル：防具無視（pierce）と鈍足（slowMs）を、撃たれた相手に伝える（ほかの武器が送ってきても無視）
       payload.damage = Math.min(payload.damage, FX_GOD_MAX_DAMAGE);
       const nowG = Date.now();
@@ -560,8 +570,28 @@ io.on('connection', (socket) => {
     if (!d) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
-    bot.health -= num(d.damage, 0, 250, 0);
-    if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
+    //bot.health -= num(d.damage, 0, 250, 0);
+    //if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
+
+//置き換え
+    
+    const hitDamage = d.weaponId === 'la_piece'
+      ? num(d.damage, 0, 65, 0)
+      : num(d.damage, 0, 250, 0);
+
+    bot.health -= hitDamage;
+
+    if (d.weaponId === 'la_piece') {
+      bot.stunnedUntil = Math.max(
+        bot.stunnedUntil || 0,
+        Date.now() + 1400
+      );
+    } else if (d.stunMs) {
+      bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
+    }
+//置き換え
+
+    
     const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ★ゴッドライフルで撃たれたBotは、しばらく鈍足
     if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
     socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
@@ -740,6 +770,34 @@ io.on('connection', (socket) => {
       respawnBotLater(bot);
     }
   });
+
+  
+  // 🌌 ラ・ピース：命中エフェクトをオンライン全員に共有
+  let laPieceImpactAt = 0;
+
+  on('laPieceImpact', (d) => {
+    const p = players[socket.id];
+    if (!p || !d) return;
+
+    const now = Date.now();
+    if (now - laPieceImpactAt < 35) return;
+    laPieceImpactAt = now;
+
+    const x = Number(d.x);
+    const y = Number(d.y);
+    const z = Number(d.z);
+
+    if (!Number.isFinite(x) || !Number.isFinite(y) ||
+        !Number.isFinite(z)) return;
+
+    socket.to(GAME_ROOM).emit('laPieceImpact', {
+      x: num(x, -500, 500, 0),
+      y: num(y, -100, 500, 0),
+      z: num(z, -500, 500, 0),
+      kind: d.kind === 'nova' ? 'nova' : 'hit'
+    });
+  });
+//ラ・ピース終わり
 
   // ---- ブロック（⑲）：置く・壊す・爆発で壊れる／マップの建物を壊す ----
   on('fxBlockSync', () => {   // いまの全部を教えて（参加した時・つなぎ直した時・食い違った時）
