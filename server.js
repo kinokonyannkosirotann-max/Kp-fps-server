@@ -104,7 +104,7 @@ const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
 const BCAST_KEEPALIVE_MS = 3000;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
-const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1 };   // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1 };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
 function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
@@ -177,6 +177,38 @@ function guard(name, fn) {   // 1つの通信でエラーが出ても、サー�
   return function () {
     try { return fn.apply(this, arguments); } catch (e) { console.error('[エラー] ' + name + ':', e && e.message); }
   };
+}
+
+// ==========================================
+// 🛡️ ★ver.18：ダメージの不正対策（ヒットの知らせを、サーバーが確かめる）
+// ==========================================
+const FX_HIT_SAFE_R = 10.5, FX_HIT_SAFE_Y = 88;   // 出現の塔（半径9・てっぺん約92m）の上からは、ダメージを出せない（クライアントの「塔を出るまで攻撃できない」と同じ）
+const FX_HIT_ORBITAL_RE = /^(nuke[0-9]*|stab|railgun|godrifle)$/;   // 大きなダメージが出てよい武器（別の入れ物で数える）
+const FX_ACTION_WINDOW_MS = 45000;   // 「撃った／振った」知らせから、この時間の間だけヒットを受け付ける（0 にすると、この確認をしない）
+const FX_VIOLATION_KICK = 12;        // 10秒の間に、おかしな知らせがこの回数に届いた接続は、切る
+const FX_TEMPBAN_MS = 10 * 60 * 1000;   // 切られた人が、また入れるようになるまで
+const fxTempBan = new Map();         // ID → 入れるようになる時刻
+function fxBucket(p, name, cap, perSec, cost) {   // 「使える量」がたまっていく入れ物。足りなければ false
+  const now = Date.now();
+  if (!p.rate) p.rate = {};
+  const r = p.rate[name] || (p.rate[name] = { t: cap, at: now });
+  r.t = Math.min(cap, r.t + (now - r.at) / 1000 * perSec); r.at = now;
+  if (r.t < cost) return false;
+  r.t -= cost;
+  return true;
+}
+function fxInSafeTower(p) { return Math.hypot(p.x - ONLINE_TOWER.x, p.z - ONLINE_TOWER.z) <= FX_HIT_SAFE_R && p.y >= FX_HIT_SAFE_Y; }
+function fxViolation(socket, p, why) {   // おかしな知らせを数えて、多すぎたら切る（ログに名前が残る）
+  const now = Date.now();
+  if (!p.vio || now - p.vio.at > 10000) p.vio = { n: 0, at: now };
+  p.vio.n++;
+  if (p.vio.n === 1 || p.vio.n % 5 === 0) console.warn('[不正？] ' + p.name + ' : ' + why + ' (' + p.vio.n + ')');
+  if (p.vio.n >= FX_VIOLATION_KICK) {
+    console.warn('[不正？] 切断しました: ' + p.name);
+    fxTempBan.set(String(p.id), now + FX_TEMPBAN_MS);
+    try { socket.emit('youWereKicked', {}); } catch (e) {}
+    setTimeout(() => { try { socket.disconnect(true); } catch (e) {} }, 200);
+  }
 }
 
 function randomSpot() {
@@ -502,6 +534,8 @@ io.on('connection', (socket) => {
     const deny = (why, msg) => { joining = false; socket.emit('fxJoinDenied', { why: why, msg: msg }); };
     if (rawId.length < 8 || rawId.length > 80 || rawId === socket.id) { deny('noid', 'アカウント情報の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
     if (!rawName) { deny('noname', '名前の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
+        const tb = fxTempBan.get(rawId);
+    if (tb && tb > Date.now()) { deny('banned', '不正の疑いで、しばらく入れません（あと約' + Math.ceil((tb - Date.now()) / 60000) + '分）'); return; }
     joining = true;
     (async () => {
       let name = rawName.slice(0, 24);
@@ -564,41 +598,53 @@ io.on('connection', (socket) => {
     if (t - shotWinAt >= 1000) { shotWinAt = t; shotWinN = 0; }
     if (++shotWinN > FX_SHOT_MAX_PER_SEC) return;   // 連打しすぎ
     if (Object.keys(d).length > 40) return;         // 項目が多すぎるものは、変な知らせ
+        const pa = players[socket.id]; if (pa) pa.lastAct = t;
     socket.to(GAME_ROOM).emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
   });
 
-  on('hitPlayer', (d) => {
-    if (!d || !d.targetId) return;
+    on('hitPlayer', (d) => {
     const attacker = players[socket.id];
-    const payload = { damage: num(d.damage, 0, 250, 0), attackerName: attacker ? (attacker.name + (d.viaTurret ? 'のタレット' : '')) : '???', attackerId: socket.id };
+    if (!attacker || !d || typeof d !== 'object') return;
+    const tsid = String(d.targetId || '');
+    const target = players[tsid];
+    if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
+    if (!(attacker.health > 0) || fxInSafeTower(attacker)) return;   // やられている人・出現の塔の上の人は、ダメージを出せない
+    const now = Date.now();
+    if (FX_ACTION_WINDOW_MS > 0 && now - (attacker.lastAct || 0) > FX_ACTION_WINDOW_MS) { fxViolation(socket, attacker, '撃っても振ってもいないのにダメージ'); return; }
+    const orbital = FX_HIT_ORBITAL_RE.test(String(d.weaponId || '').slice(0, 30));
+    const dmg = num(d.damage, 0, 250, 0);
+    if (!fxBucket(attacker, 'hitN', 60, 40, 1)) { fxViolation(socket, attacker, 'ヒットの数が多すぎる'); return; }
+    if (dmg > 0 && !(orbital ? fxBucket(attacker, 'dmgO', 4000, 150, dmg) : fxBucket(attacker, 'dmgN', 900, 500, dmg))) { fxViolation(socket, attacker, 'ダメージの合計が多すぎる'); return; }
+    const payload = { damage: dmg, attackerName: attacker.name + (d.viaTurret ? 'のタレット' : ''), attackerId: socket.id };
     if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
       payload.kbX = num(d.kbX, -1.5, 1.5, 0); payload.kbZ = num(d.kbZ, -1.5, 1.5, 0);
       payload.kbForce = num(d.kbForce, 0, 30, 6); payload.kbVertical = !!d.kbVertical;
     }
     if (d.stunMs) payload.stunMs = num(d.stunMs, 0, 6000, 0);
-    if (d.weaponId === 'godrifle' && attacker) {   // ★ゴッドライフル：防具無視（pierce）と鈍足（slowMs）を、撃たれた相手に伝える（ほかの武器が送ってきても無視）
-      payload.damage = Math.min(payload.damage, FX_GOD_MAX_DAMAGE);
+    if (d.weaponId === 'godrifle') {   // ★ゴッドライフル：防具無視（pierce）と鈍足（slowMs）
       const nowG = Date.now();
-      if (nowG - (attacker.lastGodHitAt || 0) >= FX_GOD_MIN_GAP_MS) {   // 連射が速すぎる時は、特別な効果なし（ダメージだけ）
+      if (nowG - (attacker.lastGodHitAt || 0) >= FX_GOD_MIN_GAP_MS) {
         attacker.lastGodHitAt = nowG;
         if (d.pierce === true) payload.pierce = true;
         const slow = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);
         if (slow > 0) payload.slowMs = slow;
       }
     }
-    io.to(d.targetId).emit('youWereHit', payload);
-    socket.to(GAME_ROOM).emit('playerHitFlash', { targetId: d.targetId }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
+    target.lastHitBy = { sid: socket.id, at: now };   // 「だれに倒されたか」の確認に使う
+    io.to(tsid).emit('youWereHit', payload);
+    socket.to(GAME_ROOM).emit('playerHitFlash', { targetId: tsid });
   });
 
   on('playerDied', (d) => {
     const victim = players[socket.id];
-    if (victim) victim.lastDeath = { at: Date.now(), killerId: (d && d.killerId) || null, weaponId: String(victim.weaponId || ''), used: false };   // ★誰に・何を持っていた時に倒されたか（武器を奪う時に確かめる）
-    io.emit('killFeed', {
-      victimId: socket.id,
-      victimName: victim ? victim.name : '???',
-      killerId: (d && d.killerId) || null,
-      killerName: (d && d.killerName) || null
-    });
+    if (!victim || !fxRate(victim, 'died', 0.3, 2)) return;   // 連続で「やられた」と送るのを防ぐ
+    let killerId = (d && d.killerId) ? String(d.killerId) : null;
+    const lh = victim.lastHitBy;
+    if (killerId && (killerId === socket.id || !players[killerId] || !lh || lh.sid !== killerId || Date.now() - lh.at > 15000)) killerId = null;   // ★自分で自分を「倒した」ことにしてKPを増やす不正を防ぐ
+    const killerName = killerId ? players[killerId].name : ((d && d.killerName) ? String(d.killerName).slice(0, 30) : null);
+    victim.lastDeath = { at: Date.now(), killerId: killerId, weaponId: String(victim.weaponId || ''), used: false };
+    victim.lastHitBy = null;
+    io.emit('killFeed', { victimId: socket.id, victimName: victim.name, killerId: killerId, killerName: killerName });
   });
 
   on('weaponStolen', (d) => {   // 倒した人から「武器を受け取れた」の知らせ → 倒された人の手持ちから、その武器を消させる
@@ -640,7 +686,9 @@ io.on('connection', (socket) => {
   });
 
   on('hitBot', (d) => {
-    if (!d) return;
+    if (!d) return
+      const me = players[socket.id];
+    if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
     bot.health -= num(d.damage, 0, 250, 0);
@@ -660,6 +708,8 @@ io.on('connection', (socket) => {
       if (d.kbVertical) bot.vy = Math.max(bot.vy, Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO));   // ★上にも吹き飛ぶ
     }
   });
+
+
 
   on('breakCrate', (d) => {
     const crate = d && onlineCrates.find(c => c.id === d.crateId);
@@ -762,7 +812,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  on('meleeSwing', (d) => {
+   on('meleeSwing', (d) => {
+    const pa = players[socket.id]; if (pa) pa.lastAct = Date.now();
     socket.to(GAME_ROOM).emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
 
@@ -871,6 +922,8 @@ io.on('connection', (socket) => {
     else if (d.why === 'chain') { if (Math.hypot(me.x - o.x, me.z - o.z) > 60) return; }
     else return;
     delete fxPlaced[o.id];
+        const nowM = Date.now();   // 爆発に巻きこまれた人は「この地雷の持ち主に倒された」と覚えておく
+    for (const s of Object.keys(players)) { const q = players[s]; if (Math.hypot(q.x - o.x, q.z - o.z) < 14) q.lastHitBy = { sid: o.ownerSid, at: nowM }; }
     io.emit('fxMineBoom', { id: o.id, x: o.x, y: o.y, z: o.z, ownerId: o.ownerSid, ownerName: o.ownerName, victimId: socket.id });
   });
   on('fxTAim', (d) => {   // 台座の頭の向き（他の人の画面で回して見せるため）
