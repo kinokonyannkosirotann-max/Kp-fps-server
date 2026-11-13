@@ -758,108 +758,98 @@ io.on('connection', (socket) => {
     }
   });*/
 
-    on('hitBot', (d) => {
-    
-if (!d || typeof d !== 'object') {
-  console.log('[hitBot] データ不正');
-  return;
-}
+  on('hitBot', (d) => {
+    if (!d || typeof d !== 'object') return;
 
-const me = players[socket.id];
+    const me = players[socket.id];
+    if (!me || !(me.health > 0)) return;
+    if (fxInSafeTower(me)) return;
+    if (!fxBucket(me, 'hitB', 60, 40, 1)) return;
 
-if (!me) {
-  console.log('[hitBot] プレイヤーが未登録');
-  return;
-}
+    const bot = bots.find(b => b.id === d.botId);
+    if (!bot || bot.health <= 0) return;
 
-if (!(me.health > 0)) {
-  console.log('[hitBot] 攻撃者が死亡中:', me.name);
-  return;
-}
+    const now = Date.now();
 
-if (fxInSafeTower(me)) {
-  console.log('[hitBot] 安全地帯で拒否:', me.name);
-  return;
-}
+    // ダメージ処理
+    const damage = num(d.damage, 0, 250, 0);
+    bot.health -= damage;
 
-if (!fxBucket(me, 'hitB', 60, 40, 1)) {
-  console.log('[hitBot] 回数制限で拒否:', me.name);
-  return;
-}
+    // スタン処理
+    if (d.stunMs) {
+      bot.stunnedUntil = Math.max(
+        bot.stunnedUntil || 0,
+        now + num(d.stunMs, 0, 6000, 0)
+      );
+    }
 
-const bot = bots.find(b => b.id === d.botId);
+    // 鈍足処理（ゴッドライフルなど）
+    const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);
 
-if (!bot) {
-  console.log('[hitBot] Botが見つからない:', d.botId);
-  return;
-}
+    if (slowB > 0) {
+      bot.slowUntil = Math.max(
+        bot.slowUntil || 0,
+        now + slowB
+      );
+    }
 
-if (bot.health <= 0) {
-  console.log('[hitBot] Botは死亡中:', bot.id);
-  return;
-}
+    // 被弾エフェクトをほかのプレイヤーに通知
+    socket.to(GAME_ROOM).emit('botHitFlash', {
+      botId: bot.id
+    });
 
-const now = Date.now();
-const before = bot.health;
-const damage = num(d.damage, 0, 250, 0);
-
-bot.health -= damage;
-
-console.log('[hitBot] ダメージ適用', {
-  player: me.name,
-  bot: bot.id,
-  damage: damage,
-  before: before,
-  after: bot.health
-});
-
-
-      
-    if (d.stunMs) bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + num(d.stunMs, 0, 6000, 0));
-    const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ゴッドライフルの鈍足
-    if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, now + slowB);
-    socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id });
+    // Bot死亡処理
     if (bot.health <= 0) {
-      io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: me.name || '???' });
+      io.emit('botKilled', {
+        botId: bot.id,
+        killerId: socket.id,
+        killerName: me.name || '???'
+      });
+
       respawnBotLater(bot);
       return;
     }
 
-const kx = Number(d.kbX);
-const kz = Number(d.kbZ);
+    // ノックバック処理
+    const kx = Number(d.kbX);
+    const kz = Number(d.kbZ);
 
-if (Number.isFinite(kx) && Number.isFinite(kz)) {
-  const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
+    if (Number.isFinite(kx) && Number.isFinite(kz)) {
+      const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
 
-  const dx = num(kx, -1.5, 1.5, 0) * f;
-  const dz = num(kz, -1.5, 1.5, 0) * f;
+      const dx = num(kx, -1.5, 1.5, 0) * f;
+      const dz = num(kz, -1.5, 1.5, 0) * f;
 
-  if (dx !== 0 || dz !== 0) {
-    // 直接座標を飛ばすのではなく、300ms間の吹き飛び速度にする
-    bot.kbVX = dx / 0.30;
-    bot.kbVZ = dz / 0.30;
-    bot.kbUntil = now + 300;
-  }
+      if (dx !== 0 || dz !== 0) {
+        // 300ms間、ノックバック速度を適用
+        bot.kbVX = dx / 0.30;
+        bot.kbVZ = dz / 0.30;
+        bot.kbUntil = now + 300;
+      }
 
-  if (d.kbVertical && f > 0) {
-    bot.vy = Math.max(
-      bot.vy || 0,
-      Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO)
-    );
-  }
+      // 上方向へのノックバック
+      if (d.kbVertical && f > 0) {
+        bot.vy = Math.max(
+          bot.vy || 0,
+          Math.min(
+            BOT_UP_MAX,
+            BOT_UP_BASE + f * BOT_UP_RATIO
+          )
+        );
+      }
 
-  // 吹き飛んでいる間はBotのAIを停止
-  bot.stunnedUntil = Math.max(
-    bot.stunnedUntil || 0,
-    now + 250
-  );
-}
+      // ノックバック中はBotのAIを一時停止
+      bot.stunnedUntil = Math.max(
+        bot.stunnedUntil || 0,
+        now + 250
+      );
+    }
 
-  io.to(bot.nether ? ROOM_NE : ROOM_OW)
-    .emit('botsUpdate', publicBots(!!bot.nether));
-}
+    // Botの状態を該当ワールドのプレイヤーに同期
+    io.to(bot.nether ? ROOM_NE : ROOM_OW)
+      .emit('botsUpdate', publicBots(!!bot.nether));
   });
-
+  
   on('breakCrate', (d) => {
     const crate = d && onlineCrates.find(c => c.id === d.crateId);
     if (!crate || !crate.alive) return;
