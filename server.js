@@ -1,58 +1,15 @@
 // ==========================================
-//  server16：Owner専用の /kick ＋ BAN杖に対応。★重要：今までは、全員の画面に「アカウントのID」が配られていました（IDが分かるとなりすませます）→ 配らないようにしました
-//   ・上のほうの GAS_URL に、GAS のウェブアプリURLを入れてください（空だと、/kick も BAN杖も、だれも使えません）
-//   ・GAS 側にも「ownerToolsEntry_」の追加が要ります（別ファイル）
+//  KP銃ゲー オンライン対戦サーバー（ver.18 ＋ 飛行機の同期つき）
+//   ★今回の変更は「飛行機」だけです（ほかの動きは、今のサーバーと同じ）
+//    ・飛行機の最後の状態をサーバーが覚える → あとから入ってきた人にも、止まっている飛行機が見える
+//    ・飛行機を片づけた／持ち主が抜けた時は、覚えていた状態も消す
+//    ・誰もいなくなったら、飛行機の記憶もぜんぶ消す
+//   ※ 前までの長い説明コメント（server11〜15 の履歴）は、短くしました。動きには関係ありません
+//   ※ ゲーム側（main.js）にも、飛行機の同期のコード（fx23b）が要ります（別に渡したもの）
 //
-//  server15：ドロップアイテム対応版（クライアントの ㉑ fx21 と組み合わせて使います。通信量を減らした server14 の内容も、そのまま入っています）
-//   ① やられた人の持ち物・ゴミ箱で捨てた物・こわした箱の中身が、地面に落ちて、みんなの画面に出る（150秒たつと消える）
-//   ② 先に近づいた1人だけが拾える（同時に拾っても、サーバーが1人にだけ渡す）
-//   ③ 落とした武器をほかの人に拾われたら、落とした人に「拾われた」と知らせる（チェストからも消える処理は、クライアントの fxfix3 が行います）
-//   ④ ゲームに入った人には、いま落ちている物をぜんぶ教える
-//   ※ 古いクライアントのままでも、ゲームは今まで通り動きます（落とし物が見えないだけ）
-//
-//  server14：通信量を減らした版（Render の無料枠は 1か月 5GB。位置の知らせを送りすぎて使い切ったため）。ゲームの動き・見た目は server13 と同じです
-//   ① 位置・Botの知らせ（playersUpdate／botsUpdate）は、「ゲームに入っている人」にだけ送る（今まではチャット用の接続など、全員に送っていた）
-//   ② 前回と同じ内容の時は、3秒に1回だけにする（止まっている人・放置された画面で、ほぼ送らなくなる）。動いている間は、これまで通り 0.1 秒ごと
-//   ③ みんなに送る位置の知らせから、サーバーの中だけで使う項目（速度・時刻・制限用の数字など）を外し、位置を 1cm 単位にそろえた（見た目の差は出ません）
-//   ④ 256バイト以上の知らせは圧縮して送る（perMessageDeflate。ブラウザが自動で元に戻すので、ゲーム側の変更は要りません）
-//   ⑤ 撃った知らせ・当たった点滅なども、ゲームに入っている人にだけ送る
-//   ⑥ ゲームに入った人には、すぐに全員の位置を1回送る（入った直後に、他の人が見えない時間をなくす）
-//  ※ ゲーム側（クライアント）の変更は要りません。server13 のかわりに、このファイル全部を入れ替えるだけです
-//  ※ 通信量の目安：今までの 1/10 以下（人が多いほど差が大きい）
-//
-//  server13：コスチューム（羽・キラキラ・頭）の共有（fxCostume）を足した。懸賞金のおしらせ（bountyEvent）は server12 と同じ。それ以外は server11 と同じ
-// KP銃ゲー オンライン対戦サーバー（完成版 ver.11）
+//  これまでの主な機能：ブロック・壊れる建物の共有／ドロップアイテム／ゴッドライフル／Botの武器／宝箱／台座・地雷／
+//   通信量の削減（位置は「ゲームに入っている人」にだけ）／Owner専用 /kick・BAN杖／本人確認つきの参加／ダメージの不正対策
 // ==========================================
-// ver.11 で増えたもの（server10 から）：
-//  ・オンラインのBotが、確率でいろいろな武器を持つ（ピストル・サブマシンガン・アサルトライフル・ショットガン・リボルバー・マークスマン）
-//     … 武器ごとに「撃つ間隔・連射・1発のダメージ・届く距離」が違います（下の BOT_GUNS を直すと調整できます）。強さは昔のBot（ピストル）と同じくらい。
-//        倒すと、持っていた武器がもらえます（見た目・撃ち方・もらえる武器が、ぜんぶ同じになります）
-//  ・shotFired（撃った知らせ）を中継する時に、撃った人のID（id）を付けるようにした
-//     … 神器の「撃つ動き」が、相手の画面でも、撃った人の人形に出ます（今までは id が無くて、人形が動きませんでした）
-//  ・武器を奪う：倒した人が「実際に受け取れた」と知らせた時だけ、倒された人の手持ちからその武器を消す（weaponStolen → weaponTaken）
-//     … 倒すたびに武器がコピーされて増え続ける問題の対策。すでに持っている武器は、奪われない（倒された人も、なくさない）
-//  ・shotFired は、1人あたり1秒に 60 回までにした（連打・なりすまし対策）
-//
-// 前の版（server9）から増えたもの（ver.10 の内容）：
-//  ・ブロック（クライアントの⑲）：置く・壊す・爆発で壊れる、を全員で共有（fxBlockPlace／fxBlockBreak／fxBlockBlast）
-//     … 置ける数・距離・高さ・場所などは、サーバーが確かめます（ズル・バグ対策）。ブロックの種類は、クライアントが増やしても、そのまま使えます
-//  ・壊れたマップの建物・岩・壁を全員で共有し、30分（FX_MAP_RESTORE_MS）たつと全員の画面で元に戻す（fxMapBreak／fxMapBroken／fxMapRestored）
-//  ・Botは、置かれたブロックを通り抜けられず、ブロックの向こうからは撃ってこない（ブロックで身を守れます）
-//  ・誰もいなくなったら、ブロックも壊れた建物も、はじめの状態に戻る
-//  ・クライアントに「ブロック対応です」と知らせる（fxServerInfo の blocks）… 古いクライアントのままでも、今まで通り動きます
-//
-// それ以前（server9 までに入っていたもの）：
-//  ・ゴッドライフル：当たった相手を「鈍足」にする／防具を無視するダメージを、撃たれた相手の画面へ伝える（hitPlayer の slowMs・pierce）
-//  ・オンラインのBotも、ゴッドライフルで鈍足になる（hitBot の slowMs → 動きが 0.4 倍）
-//  ・Botの弾の速さを、クライアントの「弾の速さ調整表（⑱-A）」と同じ倍率に（見た目と当たる速さをそろえる）
-//  ・ニュークは「nuke」＋数字（nuke1〜nuke999）なら何でも他のプレイヤーに渡せる（grantOrbital）… 自分で作ったレベル10なども OK
-//  ・ネザーの宝箱を、全員で同じ箱を取り合う形に（fxNChest…）
-//  ・他のプレイヤーの「上下の向き（pitch）」と「しゃがみ」を中継（頭・武器が上を向く／しゃがみが見える）
-//  ・オンラインのBotも、上に吹き飛ぶ（hitBot の kbVertical → 重力で落ちる）
-//  ・ネザライト防具（Lv4）の共有
-//  ・塔の上（高さ130mまで）と、広げたフィールドの外側にも、銃台座・地雷を置ける
-//  ・おかしな数字（NaN・巨大なダメージ）を無視して、サーバーが落ちにくく
-//  ・クライアントに「新しいサーバーです」と知らせる（fxServerInfo）… 古いサーバーのままでも、ゲームは今まで通り動きます
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -64,7 +21,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.16）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.18・飛行機同期つき）'));
 
 const SERVER_VERSION = 16;
 
@@ -73,6 +30,7 @@ const GAS_URL = 'https://script.google.com/macros/s/AKfycbxZB7YWboOmNoieH4WpyxyB
 const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
+const fxPlaneLast = new Map();         // ★飛行機の最後の状態：socket.id → 配った内容（あとから入った人に、止まっている飛行機も見せるため）
 function fxNum(v, lim) { v = Number(v); return Number.isFinite(v) ? Math.max(-lim, Math.min(lim, v)) : 0; }
 let fxBanBusyUntil = 0;               // BANの演出は、同時に1つだけ
 async function fxGasPost(obj) {
@@ -198,6 +156,10 @@ function fxBucket(p, name, cap, perSec, cost) {   // 「使える量」がたま
   return true;
 }
 function fxInSafeTower(p) { return Math.hypot(p.x - ONLINE_TOWER.x, p.z - ONLINE_TOWER.z) <= FX_HIT_SAFE_R && p.y >= FX_HIT_SAFE_Y; }
+function fxHasArmedTurret(sid) {   // ★銃を付けた台座を、いま置いている人か（台座の弾は、持ち主が何もしていなくても当たるため）
+  for (const id in fxPlaced) { const o = fxPlaced[id]; if (o.ownerSid === sid && o.kind === 'turret' && o.gun) return true; }
+  return false;
+}
 function fxViolation(socket, p, why) {   // おかしな知らせを数えて、多すぎたら切る（ログに名前が残る）
   const now = Date.now();
   if (!p.vio || now - p.vio.at > 10000) p.vio = { n: 0, at: now };
@@ -510,7 +472,7 @@ io.on('connection', (socket) => {
       return fn.apply(this, arguments);
     }));
   };
-  
+
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
 
@@ -525,7 +487,7 @@ io.on('connection', (socket) => {
   }
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
-    let joining = false, joinTries = 0;
+  let joining = false, joinTries = 0;
   on('join', (d) => {
     if (players[socket.id] || joining) return;
     if (++joinTries > 8) return;   // 何度も入りなおそうとする接続は無視
@@ -534,7 +496,7 @@ io.on('connection', (socket) => {
     const deny = (why, msg) => { joining = false; socket.emit('fxJoinDenied', { why: why, msg: msg }); };
     if (rawId.length < 8 || rawId.length > 80 || rawId === socket.id) { deny('noid', 'アカウント情報の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
     if (!rawName) { deny('noname', '名前の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
-        const tb = fxTempBan.get(rawId);
+    const tb = fxTempBan.get(rawId);
     if (tb && tb > Date.now()) { deny('banned', '不正の疑いで、しばらく入れません（あと約' + Math.ceil((tb - Date.now()) / 60000) + '分）'); return; }
     joining = true;
     (async () => {
@@ -567,6 +529,7 @@ io.on('connection', (socket) => {
       socket.emit('playersUpdate', publicPlayers());
       socket.emit('botsUpdate', publicBots());
       if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });
+      fxPlaneLast.forEach((pay, psid) => { if (psid !== socket.id && players[psid]) socket.emit('plRemote', pay); });   // ★いま出ている飛行機（止まっているものも）を、入ってきた人に教える
     })().catch((e) => { console.error('[join]', e && e.message); deny('busy', '本人確認でエラーが出ました'); });
   });
 
@@ -598,11 +561,11 @@ io.on('connection', (socket) => {
     if (t - shotWinAt >= 1000) { shotWinAt = t; shotWinN = 0; }
     if (++shotWinN > FX_SHOT_MAX_PER_SEC) return;   // 連打しすぎ
     if (Object.keys(d).length > 40) return;         // 項目が多すぎるものは、変な知らせ
-        const pa = players[socket.id]; if (pa) pa.lastAct = t;
+    const pa = players[socket.id]; if (pa) pa.lastAct = t;
     socket.to(GAME_ROOM).emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
   });
 
-    on('hitPlayer', (d) => {
+  on('hitPlayer', (d) => {
     const attacker = players[socket.id];
     if (!attacker || !d || typeof d !== 'object') return;
     const tsid = String(d.targetId || '');
@@ -610,12 +573,13 @@ io.on('connection', (socket) => {
     if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
     if (!(attacker.health > 0) || fxInSafeTower(attacker)) return;   // やられている人・出現の塔の上の人は、ダメージを出せない
     const now = Date.now();
-    if (FX_ACTION_WINDOW_MS > 0 && now - (attacker.lastAct || 0) > FX_ACTION_WINDOW_MS) { fxViolation(socket, attacker, '撃っても振ってもいないのにダメージ'); return; }
+    const viaT = !!d.viaTurret && fxHasArmedTurret(socket.id);   // ★本当に「銃つきの台座」を持っている人の、台座の弾だけ
+    if (!viaT && FX_ACTION_WINDOW_MS > 0 && now - (attacker.lastAct || 0) > FX_ACTION_WINDOW_MS) { fxViolation(socket, attacker, '撃っても振ってもいないのにダメージ'); return; }
     const orbital = FX_HIT_ORBITAL_RE.test(String(d.weaponId || '').slice(0, 30));
     const dmg = num(d.damage, 0, 250, 0);
     if (!fxBucket(attacker, 'hitN', 60, 40, 1)) { fxViolation(socket, attacker, 'ヒットの数が多すぎる'); return; }
     if (dmg > 0 && !(orbital ? fxBucket(attacker, 'dmgO', 4000, 150, dmg) : fxBucket(attacker, 'dmgN', 900, 500, dmg))) { fxViolation(socket, attacker, 'ダメージの合計が多すぎる'); return; }
-    const payload = { damage: dmg, attackerName: attacker.name + (d.viaTurret ? 'のタレット' : ''), attackerId: socket.id };
+    const payload = { damage: dmg, attackerName: attacker.name + (viaT ? 'のタレット' : ''), attackerId: socket.id };
     if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
       payload.kbX = num(d.kbX, -1.5, 1.5, 0); payload.kbZ = num(d.kbZ, -1.5, 1.5, 0);
       payload.kbForce = num(d.kbForce, 0, 30, 6); payload.kbVertical = !!d.kbVertical;
@@ -686,8 +650,8 @@ io.on('connection', (socket) => {
   });
 
   on('hitBot', (d) => {
-    if (!d) return
-      const me = players[socket.id];
+    if (!d) return;
+    const me = players[socket.id];
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
@@ -708,8 +672,6 @@ io.on('connection', (socket) => {
       if (d.kbVertical) bot.vy = Math.max(bot.vy, Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO));   // ★上にも吹き飛ぶ
     }
   });
-
-
 
   on('breakCrate', (d) => {
     const crate = d && onlineCrates.find(c => c.id === d.crateId);
@@ -737,19 +699,22 @@ io.on('connection', (socket) => {
     })().catch((e) => console.error('[kick]', e && e.message));
   });
 
-  // ---- ★飛行機の同期：位置・向きなどを、ほかの人にそのまま中継する（数字は範囲内に直す） ----
+  // ---- ★飛行機の同期：位置・向きなどを、ほかの人にそのまま中継する（数字は範囲内に直す）。最後の状態は、あとから入った人のために覚えておく ----
   let plLastAt = 0;
   on('plState', (d) => {
-    if (!d || !players[socket.id]) return;
+    if (!d || typeof d !== 'object' || !players[socket.id]) return;
     const now = Date.now(); if (now - plLastAt < 50) return; plLastAt = now;
     fxPlaneSids.add(socket.id);
-    socket.to(GAME_ROOM).emit('plRemote', { sid: socket.id, x: fxNum(d.x, 1000), y: fxNum(d.y, 1000), z: fxNum(d.z, 1000), yaw: fxNum(d.yaw, 7), pitch: fxNum(d.pitch, 7), roll: fxNum(d.roll, 7), thr: fxNum(d.thr, 1), eng: d.eng ? 1 : 0, lt: d.lt ? 1 : 0, bm: Math.max(0, Math.min(10, Math.floor(Number(d.bm) || 0))), rd: d.rd ? 1 : 0 });
+    const pay = { sid: socket.id, x: fxNum(d.x, 1000), y: fxNum(d.y, 1000), z: fxNum(d.z, 1000), yaw: fxNum(d.yaw, 7), pitch: fxNum(d.pitch, 7), roll: fxNum(d.roll, 7), thr: fxNum(d.thr, 1), eng: d.eng ? 1 : 0, lt: d.lt ? 1 : 0, bm: Math.max(0, Math.min(10, Math.floor(Number(d.bm) || 0))), rd: d.rd ? 1 : 0 };
+    fxPlaneLast.set(socket.id, pay);   // ★覚えておく（止まっている飛行機を、あとから入った人にも見せるため）
+    socket.to(GAME_ROOM).emit('plRemote', pay);
   });
   on('plGone', (d) => {
+    fxPlaneLast.delete(socket.id);
     if (!fxPlaneSids.delete(socket.id)) return;
     socket.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: d && d.boom ? 1 : 0 });
   });
-  
+
   on('fxDeviceIdAsk', (d) => {   // ★Owner だけ：ユーザー名から DeviceID を調べる。答えは、聞いた本人にだけ返す（ほかの人には送らない）
     const me = players[socket.id];
     const name = String((d && d.targetName) || '').trim().slice(0, 40);
@@ -769,7 +734,7 @@ io.on('connection', (socket) => {
       else reply({ ok: false, msg: (j && j.msg) || 'GAS につながりません' });
     })().catch((e) => { console.error('[deviceid]', e && e.message); reply({ ok: false, msg: 'エラーが出ました' }); });
   });
-  
+
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
   on('fxBanRequest', (d) => {
     if (!d || !players[socket.id]) return;
@@ -812,7 +777,7 @@ io.on('connection', (socket) => {
     }
   });
 
-   on('meleeSwing', (d) => {
+  on('meleeSwing', (d) => {
     const pa = players[socket.id]; if (pa) pa.lastAct = Date.now();
     socket.to(GAME_ROOM).emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
@@ -922,7 +887,7 @@ io.on('connection', (socket) => {
     else if (d.why === 'chain') { if (Math.hypot(me.x - o.x, me.z - o.z) > 60) return; }
     else return;
     delete fxPlaced[o.id];
-        const nowM = Date.now();   // 爆発に巻きこまれた人は「この地雷の持ち主に倒された」と覚えておく
+    const nowM = Date.now();   // 爆発に巻きこまれた人は「この地雷の持ち主に倒された」と覚えておく
     for (const s of Object.keys(players)) { const q = players[s]; if (Math.hypot(q.x - o.x, q.z - o.z) < 14) q.lastHitBy = { sid: o.ownerSid, at: nowM }; }
     io.emit('fxMineBoom', { id: o.id, x: o.x, y: o.y, z: o.z, ownerId: o.ownerSid, ownerName: o.ownerName, victimId: socket.id });
   });
@@ -1047,10 +1012,11 @@ io.on('connection', (socket) => {
 
   on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
-        if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
+    fxPlaneLast.delete(socket.id);   // ★飛行機の記憶も消す
+    if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
-    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); }   // ★誰もいなくなったら、ブロックも壊れた建物も、はじめに戻す
+    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); }   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
     for (const id of Object.keys(fxPlaced)) {
       if (fxPlaced[id].ownerSid === socket.id) { delete fxPlaced[id]; io.emit('fxPlacedRemove', { id: id, reason: 'left' }); }
     }
@@ -1189,4 +1155,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.15）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.18・飛行機同期つき）起動しました。ポート: ' + PORT));
