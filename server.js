@@ -61,8 +61,9 @@ async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceI
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
+const ROOM_OW = 'fpsOW', ROOM_NE = 'fpsNE';   // ★地上にいる人／ネザーにいる人（Botの知らせの宛先を分ける）
 const BCAST_KEEPALIVE_MS = 3000;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
-const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1 };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1, inNether: 1 };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
 function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
@@ -75,8 +76,11 @@ function publicPlayers() {   // みんなに送る形（中身は players と同
   }
   return out;
 }
-function publicBots() { return bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId })); }
-const BOT_COUNT = 4;              //オンラインのbotの数
+function publicBots(nether) { return bots.filter(b => b.health > 0 && !!b.nether === !!nether).map(b => ({ id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId })); }
+const BOT_COUNT = 4;                // ★地上のBotの数
+const NETHER_BOT_COUNT = 3;       // ★ネザーのBotの数
+const NETHER_BOT_SIGHT = 40;      // ネザーのBotが気づく距離(m)
+const NETHER_Y0 = 1000, NETHER_HALF = 120;   // ★クライアントの FX13_NY と FX13_NETHER_HALF と同じ数字//オンラインのbotの数
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
 // ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
 //   w＝出やすさ（重み。合計に対する割合）／gap＝撃つ間隔(ms)／dmg＝1発のダメージ／n＝1回に何発ずつ撃つか／burstGap＝その連射の間隔(ms)
@@ -244,15 +248,95 @@ function initBots() {
   }
 }
 initBots();
+// ---------- ★ネザーの地形（クライアントの fx13NetherBuild と同じ乱数で、柱・溶岩・ピラミッド・要塞の位置を作り直す） ----------
+const netherObs = { boxes: [], lava: [] };   // boxes：歩けない所（los＝弾も止める）／lava：溶岩
+(function buildNetherObs() {
+  const H = NETHER_HALF, rand = makeSeededRandom(20261017), occ = [];
+  const free = (x, z, r) => { if (Math.hypot(x, z) < 16 + r) return false; for (const o of occ) if (Math.hypot(o.x - x, o.z - z) < o.r + r) return false; return true; };
+  const rx = (m) => (rand() * 2 - 1) * (H - m);
+  const lavaNear = (x, z, r) => netherObs.lava.some(l => x > l.x0 - r - 1 && x < l.x1 + r + 1 && z > l.z0 - r - 1 && z < l.z1 + r + 1);
+  const box = (w, d, x, z, los) => netherObs.boxes.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2, los: !!los });
+  box(9, 5, 0, 0, false);                                              // 出入り口の門
+  [[-55, -50], [60, -38], [-30, 60]].forEach((c) => { occ.push({ x: c[0], z: c[1], r: 17 }); box(22, 22, c[0], c[1], false); box(17.6, 17.6, c[0], c[1], true); });   // ピラミッド
+  occ.push({ x: 46, z: 44, r: 21 }); box(30, 22, 46, 44, true);        // 要塞
+  for (let i = 0, tries = 0; i < 8 && tries < 200; tries++) {          // 溶岩
+    const w = 10 + rand() * 12, d = 8 + rand() * 10, x = rx(10 + w / 2), z = rx(10 + d / 2), r = Math.hypot(w, d) / 2;
+    if (!free(x, z, r * 0.9)) continue;
+    netherObs.lava.push({ x0: x - w / 2, x1: x + w / 2, z0: z - d / 2, z1: z + d / 2 }); occ.push({ x: x, z: z, r: r }); i++;
+  }
+  for (let i = 0, tries = 0; i < 40 && tries < 400; tries++) {         // 柱
+    const x = rx(8), z = rx(8), w = 1.6 + rand() * 1.8, d = 1.6 + rand() * 1.8, h = 3 + rand() * 8, r = Math.max(w, d) * 0.8 + 1.5;
+    if (!free(x, z, r) || lavaNear(x, z, r)) continue;
+    rand(); if (h > 7) rand();                                          // クライアントが材質・光る飾りに使う乱数（順番をそろえるため、使ったことにする）
+    box(w, d, x, z, true); occ.push({ x: x, z: z, r: r }); i++;
+  }
+  for (let i = 0, tries = 0; i < 40 && tries < 300; tries++) {         // 低い岩
+    const x = rx(8), z = rx(8), s = 1 + rand() * 1.8, h = 0.8 + rand() * 1.6;
+    if (!free(x, z, s + 1) || lavaNear(x, z, s + 1)) continue;
+    box(s * (0.8 + rand() * 0.6), s, x, z, false); occ.push({ x: x, z: z, r: s + 1 }); i++;
+  }
+})();
+function netherBlocked(x, z) {
+  if (Math.abs(x) > NETHER_HALF - 3 || Math.abs(z) > NETHER_HALF - 3) return true;
+  for (const b of netherObs.boxes) if (x > b.x0 - 0.5 && x < b.x1 + 0.5 && z > b.z0 - 0.5 && z < b.z1 + 0.5) return true;
+  for (const l of netherObs.lava) if (x > l.x0 - 0.3 && x < l.x1 + 0.3 && z > l.z0 - 0.3 && z < l.z1 + 0.3) return true;
+  return false;
+}
+function resolveNetherMove(cx, cz, dx, dz) {
+  let nx = cx + dx, nz = cz;
+  if (netherBlocked(nx, cz)) nx = cx;
+  nz = cz + dz;
+  if (netherBlocked(nx, nz)) nz = cz;
+  return { x: nx, z: nz };
+}
+function netherLineBlocked(ax, az, bx, bz) {   // 2点の間に、柱・ピラミッド・要塞の壁があるか（弾の通り道）
+  const dx = bx - ax, dz = bz - az, n = Math.min(160, Math.ceil(Math.hypot(dx, dz) / 0.8));
+  for (const b of netherObs.boxes) {
+    if (!b.los) continue;
+    const inA = ax > b.x0 && ax < b.x1 && az > b.z0 && az < b.z1, inB = bx > b.x0 && bx < b.x1 && bz > b.z0 && bz < b.z1;
+    if (inA && inB) continue;
+    for (let i = 1; i < n; i++) { const t = i / n, x = ax + dx * t, z = az + dz * t; if (x > b.x0 && x < b.x1 && z > b.z0 && z < b.z1) return true; }
+  }
+  return false;
+}
+function netherSpot() {
+  let x = 40, z = -20;
+  for (let k = 0; k < 80; k++) {
+    x = (Math.random() * 2 - 1) * (NETHER_HALF - 10); z = (Math.random() * 2 - 1) * (NETHER_HALF - 10);
+    if (Math.hypot(x, z) < 22) continue;   // 出入り口の近くには出さない
+    if (!netherBlocked(x, z) && !netherBlocked(x + 1.5, z) && !netherBlocked(x - 1.5, z) && !netherBlocked(x, z + 1.5) && !netherBlocked(x, z - 1.5)) break;
+  }
+  return { x: x, z: z };
+}
+for (let i = 0; i < NETHER_BOT_COUNT; i++) {
+  const p = netherSpot(), ry = NETHER_Y0 + BOT_REST_Y;
+  bots.push({ id: 'nbot_' + i, nether: true, restY: ry, x: p.x, y: ry, vy: 0, z: p.z, targetX: p.x, targetZ: p.z, health: 100, weaponId: pickBotWeapon(), lastShot: 0, stunnedUntil: 0, slowUntil: 0, stuck: 0 });
+}
+function netherBotAI(bot, now, slowK) {   // ネザーのBot：ネザーにいる人だけを狙い、柱・溶岩・壁をよける
+  let nearest = null, nd = Infinity, nsid = null;
+  for (const sid of Object.keys(players)) { const p = players[sid]; if (p.y < NETHER_Y) continue; const d = Math.hypot(p.x - bot.x, p.z - bot.z); if (d < nd) { nd = d; nearest = p; nsid = sid; } }
+  let mx = 0, mz = 0;
+  if (nearest && nd < NETHER_BOT_SIGHT) {
+    const dx = nearest.x - bot.x, dz = nearest.z - bot.z, hl = Math.hypot(dx, dz) || 1;
+    if (hl > 8) { mx = dx / hl * 0.5 * slowK; mz = dz / hl * 0.5 * slowK; }
+    const gun = BOT_GUNS[bot.weaponId] || BOT_GUNS.pistol;
+    if (now - bot.lastShot > gun.gap && nd <= gun.range && !netherLineBlocked(bot.x, bot.z, nearest.x, nearest.z)) { bot.lastShot = now; botFireVolley(bot, gun, nsid); }
+  } else {
+    if (Math.hypot(bot.targetX - bot.x, bot.targetZ - bot.z) < 1.5 || bot.stuck > 10) { const s = netherSpot(); bot.targetX = s.x; bot.targetZ = s.z; bot.stuck = 0; }
+    const dx = bot.targetX - bot.x, dz = bot.targetZ - bot.z, hl = Math.hypot(dx, dz) || 1;
+    mx = dx / hl * 0.2 * slowK; mz = dz / hl * 0.2 * slowK;
+  }
+  if (mx || mz) { const m = resolveNetherMove(bot.x, bot.z, mx, mz); bot.stuck = Math.hypot(m.x - bot.x, m.z - bot.z) < 0.02 ? (bot.stuck || 0) + 1 : 0; bot.x = m.x; bot.z = m.z; }
+}
 function respawnBotLater(bot) {
   setTimeout(() => {
-    const p = randomSpot();
-    bot.health = 100; bot.x = p.x; bot.z = p.z; bot.y = BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0; bot.slowUntil = 0;
-    bot.weaponId = pickBotWeapon();   // ★復活のたびに、くじ引きで武器が変わる
+    const p = bot.nether ? netherSpot() : randomSpot();
+    bot.health = 100; bot.x = p.x; bot.z = p.z; bot.targetX = p.x; bot.targetZ = p.z; bot.y = bot.restY || BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0; bot.slowUntil = 0;
+    bot.weaponId = pickBotWeapon();
   }, 6000);
 }
 function clampBotToWorld(bot) {
-  const lim = WORLD_HALF - 3;
+  const lim = (bot.nether ? NETHER_HALF : WORLD_HALF) - 3;
   bot.x = Math.max(-lim, Math.min(lim, bot.x));
   bot.z = Math.max(-lim, Math.min(lim, bot.z));
 }
@@ -524,10 +608,11 @@ io.on('connection', (socket) => {
       };
       console.log('参加:', name);
       socket.join(GAME_ROOM);
+      socket.join(ROOM_OW);
       fxOwnerRefresh(false).catch(() => {});   // さっきの確認の記憶を使うので、GASにはもう聞かない
       socket.emit('crateUpdate', onlineCrates);
       socket.emit('playersUpdate', publicPlayers());
-      socket.emit('botsUpdate', publicBots());
+      socket.emit('botsUpdate', publicBots(false));
       if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });
       fxPlaneLast.forEach((pay, psid) => { if (psid !== socket.id && players[psid]) socket.emit('plRemote', pay); });   // ★いま出ている飛行機（止まっているものも）を、入ってきた人に教える
     })().catch((e) => { console.error('[join]', e && e.message); deny('busy', '本人確認でエラーが出ました'); });
@@ -546,7 +631,8 @@ io.on('connection', (socket) => {
       p.velZ = (z - p.z) / dtSec;
     }
     p.lastUpdateT = now;
-    p.x = x; p.y = y; p.z = z; p.yaw = yaw;
+    const inN = y >= NETHER_Y;   // ★ネザーに出入りしたら、Botの知らせの部屋を切りかえて、すぐ送る
+    if (inN !== !!p.inNether) { p.inNether = inN; if (inN) { socket.leave(ROOM_OW); socket.join(ROOM_NE); } else { socket.leave(ROOM_NE); socket.join(ROOM_OW); } socket.emit('botsUpdate', publicBots(inN)); }
     p.pitch = num(d.pitch, -1.6, 1.6, 0);            // ★上下の向き（頭・武器が上を向く）
     p.crouching = !!d.crouching;                      // ★しゃがみ（他の人の画面でもしゃがむ）
     p.weaponId = String(d.weaponId || 'pistol').slice(0, 30);
@@ -1046,15 +1132,17 @@ io.on('connection', (socket) => {
 // ⏱️ 定期的な処理
 // ==========================================
 let lastPlayersJson = '', lastPlayersAt = 0, lastBotsJson = '', lastBotsAt = 0;
+let lastNBotsJson = '', lastNBotsAt = 0;
 setInterval(() => {   // ゲームに入っている人にだけ、全員の位置・Botの位置を配る（0.1秒ごと）。前回と同じ内容なら、3秒に1回だけ
   const room = io.sockets.adapter.rooms.get(GAME_ROOM);
   if (!room || room.size === 0) return;   // 誰もゲームに入っていなければ、何も送らない
   const now = Date.now();
   const pl = publicPlayers(), ps = JSON.stringify(pl);
   if (ps !== lastPlayersJson || now - lastPlayersAt >= BCAST_KEEPALIVE_MS) { lastPlayersJson = ps; lastPlayersAt = now; io.to(GAME_ROOM).emit('playersUpdate', pl); }
-  const bl = publicBots(), bs = JSON.stringify(bl);
-  if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(GAME_ROOM).emit('botsUpdate', bl); }
-}, 100);
+  const bl = publicBots(false), bs = JSON.stringify(bl);
+  if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(ROOM_OW).emit('botsUpdate', bl); }
+  const nr = io.sockets.adapter.rooms.get(ROOM_NE);
+  if (nr && nr.size) { const nl = publicBots(true), ns = JSON.stringify(nl); if (ns !== lastNBotsJson || now - lastNBotsAt >= BCAST_KEEPALIVE_MS) { lastNBotsJson = ns; lastNBotsAt = now; io.to(ROOM_NE).emit('botsUpdate', nl); } }
 
 setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える）
   if (fxDrops.size === 0) return;
@@ -1067,19 +1155,21 @@ setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重�
   const dt = 0.05;
   for (const bot of bots) {
     if (bot.health <= 0) continue;
-    if (bot.vy === 0 && bot.y <= BOT_REST_Y) continue;
+    const rest = bot.restY || BOT_REST_Y;   // ★ネザーのBotは、地面の高さが違う（1001.3）
+    if (bot.vy === 0 && bot.y <= rest) continue;
     bot.vy -= BOT_GRAV * dt;
     bot.y += bot.vy * dt;
-    if (bot.y <= BOT_REST_Y) { bot.y = BOT_REST_Y; bot.vy = 0; }
+    if (bot.y <= rest) { bot.y = rest; bot.vy = 0; }
   }
 }, 50);
+  
 
 function botFireVolley(bot, gun, targetSid) {   // 1回ぶんの射撃（連射する武器は、間をあけて何発か）
   for (let k = 0; k < gun.n; k++) {
     const fire = () => {
       if (bot.health <= 0) return;                 // 撃っている途中でやられたら、そこでやめる
       const p = players[targetSid];
-      if (!p || p.health <= 0 || p.y >= TOWER_SAFE_Y) return;
+      if (!p || p.health <= 0 || (bot.nether ? p.y < NETHER_Y : p.y >= TOWER_SAFE_Y)) return;
       botFireBullet(bot, gun, p, targetSid);
     };
     if (k === 0) fire(); else setTimeout(fire, k * gun.burstGap);
@@ -1117,7 +1207,7 @@ function botFireBullet(bot, gun, p, targetSid) {   // 1発（ショットガン�
     const bulletZ = originZ + main.z * bulletSpeed * travelSec;
     const ddx = p2.x - bulletX, ddy = (p2.y - 0.8) - bulletY, ddz = p2.z - bulletZ;
     const hitDist = Math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-    if (hitDist < 2.2 && !fxLineBlocked(originX, originY, originZ, p2.x, p2.y - 0.8, p2.z)) {   // ★弾が飛んでいる間にブロックが置かれたら、当たらない
+    if (hitDist < 2.2 && !fxLineBlocked(originX, originY, originZ, p2.x, p2.y - 0.8, p2.z) && !(bot.nether && netherLineBlocked(originX, originZ, p2.x, p2.z))) {   // ★弾が飛んでいる間にブロックが置かれたら、当たらない
       let damage = gun.dmg;
       if (pellets > 1) damage = gun.dmg * Math.round(pellets * Math.max(0, 1 - dist / gun.range));   // ショットガン：近いほど、粒がたくさん当たる
       damage = Math.round(damage);
@@ -1132,6 +1222,7 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
     if (bot.health <= 0) continue;
     if (bot.stunnedUntil && now < bot.stunnedUntil) continue;
     const slowK = (bot.slowUntil && now < bot.slowUntil) ? BOT_SLOW_MUL : 1;   // ★鈍足中は、動きが 0.4 倍
+        if (bot.nether) { netherBotAI(bot, now, slowK); continue; }   // ★ネザーのBotは、別のAI
 
     let nearest = null, nearestDist = Infinity, nearestSid = null;
     for (const sid of Object.keys(players)) {
