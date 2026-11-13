@@ -441,6 +441,7 @@ const FX_DROP_MAX = 400;                  // 地面に落ちていられる合�
 const FX_DROP_PER_EVENT = 60;             // 1回の知らせで落とせる数
 const FX_DROP_PICK_REACH = 8;             // 拾う時：サーバーが知っている位置から、この距離(m)まで（通信の遅れの余裕を含む）
 const FX_DROP_ID_RE = /^[a-z0-9_]{1,32}$/;
+const FX_DROP_DENY_RE = /^(banrod|godrifle|kami_.*)$/;   // 落とし物にできない物
 const fxDrops = new Map();                // 番号 → 落とし物
 let fxDropSeq = 0;
 function fxDropPublic(r) { return { did: r.did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at, x: r.x, y: r.y, z: r.z, s: r.s, src: r.src, rare: r.rare }; }
@@ -449,6 +450,7 @@ function fxDropClean(d, src, sid) {   // クライアントから来た落とし
   const k = String(d.k || ''), id = String(d.id || '');
   if (k !== 'w' && k !== 'i' && k !== 'a' && k !== 'm') return null;
   if (!FX_DROP_ID_RE.test(id)) return null;
+    if (FX_DROP_DENY_RE.test(id)) return null;
   const x = Number(d.x), y = Number(d.y), z = Number(d.z);
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
   if (Math.abs(x) > 1000 || Math.abs(z) > 1000 || y < -60 || y > NETHER_Y + 300) return null;
@@ -515,6 +517,7 @@ io.on('connection', (socket) => {
       } else if (FX_BAD_NAMES.indexOf(name.toLowerCase()) >= 0) { deny('noname', '名前が読み込まれていません'); return; }
       if (players[socket.id] || !socket.connected) { joining = false; return; }
       joining = false;
+      for (const s of Object.keys(players)) { if (players[s].id === rawId) { deny('dup', 'このアカウントは、すでにオンラインです'); return; } }
       players[socket.id] = {
         id: rawId,
         name: name,
@@ -783,14 +786,13 @@ io.on('connection', (socket) => {
   });
   
   on('grantOrbital', (d) => {
+    const me = players[socket.id];
+    if (!me || !me.owner) return;   // ★Ownerだけ
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
-    if (!isOrbitalType(orbitalType)) return;   // ★nuke＋数字・railgun も渡せる
-    const granter = players[socket.id];
+    if (!isOrbitalType(orbitalType)) return;
     const targetSid = Object.keys(players).find(sid => players[sid].name.toLowerCase() === targetName);
-    if (targetSid) {
-      io.to(targetSid).emit('orbitalGranted', { orbitalType: orbitalType, granterName: granter ? granter.name : '誰か' });
-    }
+    if (targetSid) io.to(targetSid).emit('orbitalGranted', { orbitalType: orbitalType, granterName: me.name });
   });
 
   on('meleeSwing', (d) => {
@@ -984,6 +986,7 @@ io.on('connection', (socket) => {
   on('chatMessage', (d) => {
     const p = players[socket.id];
     const text = String((d && d.text) || '').slice(0, 200);
+        if (!p || !fxRate(p, 'chat', 0.05, 15)) return;
     if (!text) return;
     socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
   });
