@@ -763,9 +763,28 @@ io.on('connection', (socket) => {
     const me = players[socket.id];
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 60, 40, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
+
+      
+console.log('[Bot攻撃受信]', {
+  botId: d.botId,
+  damage: d.damage,
+  healthBefore: bot ? bot.health : 'Botなし',
+  player: me.name,
+  safeTower: fxInSafeTower(me)
+});
+      
+      
     if (!bot || bot.health <= 0) return;
     const now = Date.now();
-    bot.health -= num(d.damage, 0, 250, 0);
+bot.health -= num(d.damage, 0, 250, 0);
+
+console.log('[Botダメージ適用]', {
+  botId: bot.id,
+  damage: d.damage,
+  healthAfter: bot.health
+});
+
+      
     if (d.stunMs) bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + num(d.stunMs, 0, 6000, 0));
     const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ゴッドライフルの鈍足
     if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, now + slowB);
@@ -775,19 +794,47 @@ io.on('connection', (socket) => {
       respawnBotLater(bot);
       return;
     }
-    const kx = Number(d.kbX), kz = Number(d.kbZ);
-    if (Number.isFinite(kx) && Number.isFinite(kz)) {   // ★ノックバック
-      const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
-      const dx = num(kx, -1.5, 1.5, 0) * f, dz = num(kz, -1.5, 1.5, 0) * f;
-      if (dx !== 0 || dz !== 0) {
-        const m = bot.nether ? resolveNetherMove(bot.x, bot.z, dx, dz) : resolveBotMove(bot.x, bot.z, bot.x + dx, bot.z + dz, bot.y);   // 壁・ブロック・溶岩にめり込まない
-        bot.x = m.x; bot.z = m.z;
-        clampBotToWorld(bot);
-      }
-      if (d.kbVertical && f > 0) bot.vy = Math.max(bot.vy || 0, Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO));   // 上にも吹き飛ぶ
-      bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + 350);   // AIがすぐ押し戻さないように、少しだけ止める
-      io.to(bot.nether ? ROOM_NE : ROOM_OW).emit('botsUpdate', publicBots(!!bot.nether));   // すぐ全員に知らせる
+    const kx = Number(d.kbX);
+const kz = Number(d.kbZ);
+
+if (Number.isFinite(kx) && Number.isFinite(kz)) {
+  const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
+
+  const dx = num(kx, -1.5, 1.5, 0) * f;
+  const dz = num(kz, -1.5, 1.5, 0) * f;
+
+  if (dx !== 0 || dz !== 0) {
+    // 地上Botは以前のKB方式に戻す
+    if (!bot.nether) {
+      bot.x += dx;
+      bot.z += dz;
+      clampBotToWorld(bot);
+    } else {
+      // ネザーBotは地形判定を維持
+      const m = resolveNetherMove(
+        bot.x, bot.z, dx, dz
+      );
+      bot.x = m.x;
+      bot.z = m.z;
+      clampBotToWorld(bot);
     }
+  }
+
+  if (d.kbVertical && f > 0) {
+    bot.vy = Math.max(
+      bot.vy || 0,
+      Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO)
+    );
+  }
+
+  bot.stunnedUntil = Math.max(
+    bot.stunnedUntil || 0,
+    now + 350
+  );
+
+  io.to(bot.nether ? ROOM_NE : ROOM_OW)
+    .emit('botsUpdate', publicBots(!!bot.nether));
+}
   });
 
   on('breakCrate', (d) => {
