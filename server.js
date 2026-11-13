@@ -26,7 +26,7 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const SERVER_VERSION = 18;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbxZB7YWboOmNoieH4WpyxyBgs8VZuL9zKjV_q-eDSGxvEOaMVL-7qEm6bWLniq_bpk/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxzgDW5fnSzU0Y_umyxHmbkw3zWkyR5mcBE-ALiS7urpqoQ9sLewMp7F4iBuPzOutQ/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
@@ -735,7 +735,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  on('hitBot', (d) => {
+  /*on('hitBot', (d) => {
     if (!d) return;
     const me = players[socket.id];
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
@@ -756,6 +756,38 @@ io.on('connection', (socket) => {
       bot.z += num(d.kbZ, -1.5, 1.5, 0) * f;
       clampBotToWorld(bot);
       if (d.kbVertical) bot.vy = Math.max(bot.vy, Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO));   // ★上にも吹き飛ぶ
+    }
+  });*/
+
+    on('hitBot', (d) => {
+    if (!d || typeof d !== 'object') return;
+    const me = players[socket.id];
+    if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 60, 40, 1)) return;
+    const bot = bots.find(b => b.id === d.botId);
+    if (!bot || bot.health <= 0) return;
+    const now = Date.now();
+    bot.health -= num(d.damage, 0, 250, 0);
+    if (d.stunMs) bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + num(d.stunMs, 0, 6000, 0));
+    const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ゴッドライフルの鈍足
+    if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, now + slowB);
+    socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id });
+    if (bot.health <= 0) {
+      io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: me.name || '???' });
+      respawnBotLater(bot);
+      return;
+    }
+    const kx = Number(d.kbX), kz = Number(d.kbZ);
+    if (Number.isFinite(kx) && Number.isFinite(kz)) {   // ★ノックバック
+      const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
+      const dx = num(kx, -1.5, 1.5, 0) * f, dz = num(kz, -1.5, 1.5, 0) * f;
+      if (dx !== 0 || dz !== 0) {
+        const m = bot.nether ? resolveNetherMove(bot.x, bot.z, dx, dz) : resolveBotMove(bot.x, bot.z, bot.x + dx, bot.z + dz, bot.y);   // 壁・ブロック・溶岩にめり込まない
+        bot.x = m.x; bot.z = m.z;
+        clampBotToWorld(bot);
+      }
+      if (d.kbVertical && f > 0) bot.vy = Math.max(bot.vy || 0, Math.min(BOT_UP_MAX, BOT_UP_BASE + f * BOT_UP_RATIO));   // 上にも吹き飛ぶ
+      bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + 350);   // AIがすぐ押し戻さないように、少しだけ止める
+      io.to(bot.nether ? ROOM_NE : ROOM_OW).emit('botsUpdate', publicBots(!!bot.nether));   // すぐ全員に知らせる
     }
   });
 
