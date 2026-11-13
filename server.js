@@ -1141,10 +1141,11 @@ setInterval(() => {   // ゲームに入っている人にだけ、全員の位�
   if (ps !== lastPlayersJson || now - lastPlayersAt >= BCAST_KEEPALIVE_MS) { lastPlayersJson = ps; lastPlayersAt = now; io.to(GAME_ROOM).emit('playersUpdate', pl); }
   const bl = publicBots(false), bs = JSON.stringify(bl);
   if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(ROOM_OW).emit('botsUpdate', bl); }
-  const nr = io.sockets.adapter.rooms.get(ROOM_NE);
+    const nr = io.sockets.adapter.rooms.get(ROOM_NE);
   if (nr && nr.size) { const nl = publicBots(true), ns = JSON.stringify(nl); if (ns !== lastNBotsJson || now - lastNBotsAt >= BCAST_KEEPALIVE_MS) { lastNBotsJson = ns; lastNBotsAt = now; io.to(ROOM_NE).emit('botsUpdate', nl); } }
+}, 100);   
 
-setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える）
+setInterval(() => {   // ★落とし物の時間切れ
   if (fxDrops.size === 0) return;
   const now = Date.now(), gone = [];
   for (const [did, r] of fxDrops) { if (now - r.born >= FX_DROP_LIFETIME_MS) { fxDrops.delete(did); gone.push(did); } }
