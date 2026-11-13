@@ -759,30 +759,60 @@ io.on('connection', (socket) => {
   });*/
 
     on('hitBot', (d) => {
-    if (!d || typeof d !== 'object') return;
-    const me = players[socket.id];
-    if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 60, 40, 1)) return;
-    const bot = bots.find(b => b.id === d.botId);
+    
+if (!d || typeof d !== 'object') {
+  console.log('[hitBot] データ不正');
+  return;
+}
 
-      
-console.log('[Bot攻撃受信]', {
-  botId: d.botId,
-  damage: d.damage,
-  healthBefore: bot ? bot.health : 'Botなし',
+const me = players[socket.id];
+
+if (!me) {
+  console.log('[hitBot] プレイヤーが未登録');
+  return;
+}
+
+if (!(me.health > 0)) {
+  console.log('[hitBot] 攻撃者が死亡中:', me.name);
+  return;
+}
+
+if (fxInSafeTower(me)) {
+  console.log('[hitBot] 安全地帯で拒否:', me.name);
+  return;
+}
+
+if (!fxBucket(me, 'hitB', 60, 40, 1)) {
+  console.log('[hitBot] 回数制限で拒否:', me.name);
+  return;
+}
+
+const bot = bots.find(b => b.id === d.botId);
+
+if (!bot) {
+  console.log('[hitBot] Botが見つからない:', d.botId);
+  return;
+}
+
+if (bot.health <= 0) {
+  console.log('[hitBot] Botは死亡中:', bot.id);
+  return;
+}
+
+const now = Date.now();
+const before = bot.health;
+const damage = num(d.damage, 0, 250, 0);
+
+bot.health -= damage;
+
+console.log('[hitBot] ダメージ適用', {
   player: me.name,
-  safeTower: fxInSafeTower(me)
+  bot: bot.id,
+  damage: damage,
+  before: before,
+  after: bot.health
 });
-      
-      
-    if (!bot || bot.health <= 0) return;
-    const now = Date.now();
-bot.health -= num(d.damage, 0, 250, 0);
 
-console.log('[Botダメージ適用]', {
-  botId: bot.id,
-  damage: d.damage,
-  healthAfter: bot.health
-});
 
       
     if (d.stunMs) bot.stunnedUntil = Math.max(bot.stunnedUntil || 0, now + num(d.stunMs, 0, 6000, 0));
@@ -794,7 +824,8 @@ console.log('[Botダメージ適用]', {
       respawnBotLater(bot);
       return;
     }
-    const kx = Number(d.kbX);
+
+const kx = Number(d.kbX);
 const kz = Number(d.kbZ);
 
 if (Number.isFinite(kx) && Number.isFinite(kz)) {
@@ -804,20 +835,10 @@ if (Number.isFinite(kx) && Number.isFinite(kz)) {
   const dz = num(kz, -1.5, 1.5, 0) * f;
 
   if (dx !== 0 || dz !== 0) {
-    // 地上Botは以前のKB方式に戻す
-    if (!bot.nether) {
-      bot.x += dx;
-      bot.z += dz;
-      clampBotToWorld(bot);
-    } else {
-      // ネザーBotは地形判定を維持
-      const m = resolveNetherMove(
-        bot.x, bot.z, dx, dz
-      );
-      bot.x = m.x;
-      bot.z = m.z;
-      clampBotToWorld(bot);
-    }
+    // 直接座標を飛ばすのではなく、300ms間の吹き飛び速度にする
+    bot.kbVX = dx / 0.30;
+    bot.kbVZ = dz / 0.30;
+    bot.kbUntil = now + 300;
   }
 
   if (d.kbVertical && f > 0) {
@@ -827,10 +848,12 @@ if (Number.isFinite(kx) && Number.isFinite(kz)) {
     );
   }
 
+  // 吹き飛んでいる間はBotのAIを停止
   bot.stunnedUntil = Math.max(
     bot.stunnedUntil || 0,
-    now + 350
+    now + 250
   );
+}
 
   io.to(bot.nether ? ROOM_NE : ROOM_OW)
     .emit('botsUpdate', publicBots(!!bot.nether));
@@ -1230,18 +1253,58 @@ setInterval(() => {   // ★落とし物の時間切れ
   if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
 }, 5000);
 
-setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重力で落ちてくる）
+
+setInterval(() => {
   const dt = 0.05;
+  const now = Date.now();
+
   for (const bot of bots) {
     if (bot.health <= 0) continue;
-    const rest = bot.restY || BOT_REST_Y;   // ★ネザーのBotは、地面の高さが違う（1001.3）
+
+    // 横方向のノックバック速度を適用
+    if (bot.kbUntil && now < bot.kbUntil) {
+      const dx = (bot.kbVX || 0) * dt;
+      const dz = (bot.kbVZ || 0) * dt;
+
+      if (bot.nether) {
+        const m = resolveNetherMove(bot.x, bot.z, dx, dz);
+        bot.x = m.x;
+        bot.z = m.z;
+      } else {
+        const m = resolveBotMove(
+          bot.x,
+          bot.z,
+          bot.x + dx,
+          bot.z + dz,
+          bot.y
+        );
+        bot.x = m.x;
+        bot.z = m.z;
+      }
+
+      clampBotToWorld(bot);
+    } else {
+      bot.kbVX = 0;
+      bot.kbVZ = 0;
+      bot.kbUntil = 0;
+    }
+
+    // 上下方向の重力処理
+    const rest = bot.restY || BOT_REST_Y;
+
     if (bot.vy === 0 && bot.y <= rest) continue;
+
     bot.vy -= BOT_GRAV * dt;
     bot.y += bot.vy * dt;
-    if (bot.y <= rest) { bot.y = rest; bot.vy = 0; }
+
+    if (bot.y <= rest) {
+      bot.y = rest;
+      bot.vy = 0;
+    }
   }
 }, 50);
-  
+
+
 
 function botFireVolley(bot, gun, targetSid) {   // 1回ぶんの射撃（連射する武器は、間をあけて何発か）
   for (let k = 0; k < gun.n; k++) {
