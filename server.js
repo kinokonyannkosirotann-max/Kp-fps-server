@@ -536,7 +536,7 @@ io.on('connection', (socket) => {
   on('updateState', (d) => {
     const p = players[socket.id];
     if (!p || !d) return;
-    if (p.banLock && Date.now() < p.banLock) return;   // ★BANの演出中の人は、動かせない（位置を変えない）
+    if (p.banLock && Date.now() < p.banLock) { p.pitch = num(d.pitch, -1.6, 1.6, 0); return; }   // ★演出中は位置は変えない。見上げる向きだけは、ほかの人にも見せる   // ★BANの演出中の人は、動かせない（位置を変えない）
     const x = Number(d.x), y = Number(d.y), z = Number(d.z), yaw = Number(d.yaw);
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(yaw)) return;   // おかしな数字は無視
     const now = Date.now();
@@ -741,31 +741,47 @@ io.on('connection', (socket) => {
     const reply = (ok, msg) => socket.emit('fxBanResult', { ok: ok, msg: msg });
     const now = Date.now();
     if (fxBanBusyUntil > now) { reply(false, '別のBANの演出中です。少し待ってください'); return; }
+    const me = players[socket.id];
+    if (!me.owner) { reply(false, 'Owner だけが使えます'); return; }   // 入口は記憶で即答（ほんとうの確認は、裏でGASがする）
     let tsid = (d.targetId && players[String(d.targetId)]) ? String(d.targetId) : null;
     if (!tsid) { const q = String(d.targetName || '').trim().toLowerCase(); tsid = Object.keys(players).find(s => players[s].name.toLowerCase() === q) || null; }
     if (!tsid) { reply(false, 'その人は、もうオンラインにいません'); return; }
     if (tsid === socket.id) { reply(false, '自分はBANできません'); return; }
+    const t = players[tsid];
     const reason = String(d.reason || '').replace(/[\[\]()'"\r\n]/g, '').trim().slice(0, 60);
     const minutes = Math.max(0, Math.min(2628000, Math.floor(Number(d.minutes) || 0)));
-    fxBanBusyUntil = now + FX_BAN_SHOW_MS + 8000;
-    (async () => {
-      const me = players[socket.id];
-      if (!me || !(await fxOwnerRefresh(true))) { fxBanBusyUntil = 0; reply(false, 'Owner だけが使えます'); return; }
-      const t = players[tsid];
-      if (!t) { fxBanBusyUntil = 0; reply(false, 'その人は、もうオンラインにいません'); return; }
-      const j = await fxGasPost({ action: 'fpsOwnerBan', id: me.id, targetId: t.id, reason: reason, minutes: minutes });
-      if (!j || j.status !== 'success') { fxBanBusyUntil = 0; reply(false, (j && j.msg) || 'GAS につながりません（GAS_URL を確かめてください）'); return; }
-      fxOwnerCache.delete(String(t.id).trim());
-      const pos = { x: t.x, y: t.y, z: t.z };
-      t.banLock = Date.now() + FX_BAN_SHOW_MS + 7000;
-      io.to(GAME_ROOM).emit('fxBanStart', { ownerSid: socket.id, ownerName: me.name, targetSid: tsid, targetName: t.name, x: pos.x, y: pos.y, z: pos.z, ms: FX_BAN_SHOW_MS, perm: minutes === 0 });
-      reply(true, 'BANしました：' + t.name + (minutes ? '（' + minutes + '分）' : '（無期限）'));
-      setTimeout(() => { io.to(GAME_ROOM).emit('fxBanSlam', { ownerSid: socket.id, targetSid: tsid, x: pos.x, y: pos.y, z: pos.z }); }, FX_BAN_SHOW_MS);
-      setTimeout(() => { io.to(tsid).emit('fxBanKill', {}); }, FX_BAN_SHOW_MS + 600);
-      setTimeout(() => { const s = io.sockets.sockets.get(tsid); if (s) s.disconnect(true); }, FX_BAN_SHOW_MS + 3600);
-    })().catch((e) => { fxBanBusyUntil = 0; console.error('[ban]', e && e.message); reply(false, 'エラーが出ました'); });
-  });
+    const tName = t.name, tId = t.id, pos = { x: t.x, y: t.y, z: t.z };
+    fxBanBusyUntil = now + FX_BAN_SHOW_MS + 14000;
+    t.banLock = now + FX_BAN_SHOW_MS + 20000;
 
+    // ★本人確認とBANの書きこみは、演出と同時に、裏で進める
+    const task = (async () => {
+      if (!(await fxOwnerRefresh(true))) return { ok: false, msg: 'Owner だけが使えます' };
+      const j = await fxGasPost({ action: 'fpsOwnerBan', id: me.id, targetId: tId, reason: reason, minutes: minutes });
+      if (!j || j.status !== 'success') return { ok: false, msg: (j && j.msg) || 'GAS につながりません（GAS_URL を確かめてください）' };
+      return { ok: true };
+    })().catch((e) => { console.error('[ban]', e && e.message); return { ok: false, msg: 'エラーが出ました' }; });
+
+    io.to(GAME_ROOM).emit('fxBanStart', { ownerSid: socket.id, ownerName: me.name, targetSid: tsid, targetName: tName, x: pos.x, y: pos.y, z: pos.z, ms: FX_BAN_SHOW_MS, perm: minutes === 0 });
+    reply(true, '執行します：' + tName);
+
+    setTimeout(async () => {
+      const r = await task;   // 演出が終わっても、GASの返事が遅ければ、ここで待つ
+      if (!r.ok) {   // 失敗：演出を取り消して、相手を解放する
+        const tt = players[tsid]; if (tt) tt.banLock = 0;
+        fxBanBusyUntil = 0;
+        io.to(GAME_ROOM).emit('fxBanAbort', {});
+        reply(false, r.msg);
+        return;
+      }
+      fxOwnerCache.delete(String(tId).trim());
+      io.to(GAME_ROOM).emit('fxBanSlam', { ownerSid: socket.id, targetSid: tsid, x: pos.x, y: pos.y, z: pos.z });
+      reply(true, 'BANしました：' + tName + (minutes ? '（' + minutes + '分）' : '（無期限）'));
+      setTimeout(() => { io.to(tsid).emit('fxBanKill', {}); }, 600);
+      setTimeout(() => { const s = io.sockets.sockets.get(tsid); if (s) s.disconnect(true); }, 3600);
+    }, FX_BAN_SHOW_MS);
+  });
+  
   on('grantOrbital', (d) => {
     const targetName = String((d && d.targetName) || '').trim().toLowerCase();
     const orbitalType = String((d && d.orbitalType) || '').trim();
