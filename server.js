@@ -23,7 +23,7 @@ const io = new Server(server, {
 
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.18・飛行機同期つき）'));
 
-const SERVER_VERSION = 16;
+const SERVER_VERSION = 18;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxZB7YWboOmNoieH4WpyxyBgs8VZuL9zKjV_q-eDSGxvEOaMVL-7qEm6bWLniq_bpk/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
