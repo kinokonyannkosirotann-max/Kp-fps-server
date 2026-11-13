@@ -76,7 +76,7 @@ function publicPlayers() {   // みんなに送る形（中身は players と同
   return out;
 }
 function publicBots() { return bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId })); }
-const BOT_COUNT = 2;
+const BOT_COUNT = 4;              //オンラインのbotの数
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
 // ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
 //   w＝出やすさ（重み。合計に対する割合）／gap＝撃つ間隔(ms)／dmg＝1発のダメージ／n＝1回に何発ずつ撃つか／burstGap＝その連射の間隔(ms)
