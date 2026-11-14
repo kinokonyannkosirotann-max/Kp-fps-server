@@ -30,7 +30,7 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const SERVER_VERSION = 16;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbxzgDW5fnSzU0Y_umyxHmbkw3zWkyR5mcBE-ALiS7urpqoQ9sLewMp7F4iBuPzOutQ/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbycCM-b4iac28uf-8jOTS86OOzjuJlFexVQ4xeyfJa2Lmf6dsKrbZpYrLFfvqrJxlU/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 3500;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
