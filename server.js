@@ -465,7 +465,25 @@ function fxDropMakeRoom(n) {   // 入りきらない時は、古い物から消�
   if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
 }
 
-const FX_PRE_JOIN_OK = { join: 1, disconnect: 1, fxOwnerAsk: 1, chatJoin: 1, dmMessage: 1, groupMessage: 1, fxChestSync: 1, fxNChestSync: 1, fxPlacedSync: 1, fxBlockSync: 1 };   // 本人確認の前でも使えるもの（チャット専用の接続・読むだけの同期）
+// ---------- ★線路とトロッコ（クライアントの fxrail と組み合わせて使います） ----------
+const FXR_MAX_RAILS = 3000, FXR_MAX_RAILS_PER = 400, FXR_MAX_CARTS = 30, FXR_MAX_CARTS_PER = 3;
+const fxRails = new Map();        // 'x,y,z' → { x, y, z, ax, owner }
+const fxRailOwned = {};           // 持ち主ID → いま置いている線路の数
+const fxCarts = new Map();        // id → { id, x, y, z, dx, dz, sp, rider, owner }
+let fxCartSeq = 0;
+function fxCartInfo(c) { return { id: c.id, x: c.x, y: c.y, z: c.z, dx: c.dx, dz: c.dz, sp: c.sp, rider: c.rider }; }
+function fxrSnapshot() {
+  const list = [], carts = [];
+  fxRails.forEach((r) => { list.push([r.x, r.y, r.z, r.ax]); });
+  fxCarts.forEach((c) => { carts.push(fxCartInfo(c)); });
+  return { list: list, carts: carts };
+}
+function fxrResetAll() { fxRails.clear(); fxCarts.clear(); for (const k of Object.keys(fxRailOwned)) delete fxRailOwned[k]; }
+function fxrFreeRider(sid) {   // この人が乗っているトロッコを、空きにする 
+  fxCarts.forEach((c) => { if (c.rider === sid) { c.rider = null; c.sp = 0; io.to(GAME_ROOM).emit('fxrCartRider', { id: c.id, rider: null }); } });
+}
+
+const FX_PRE_JOIN_OK = { join: 1, disconnect: 1, fxOwnerAsk: 1, chatJoin: 1, dmMessage: 1, groupMessage: 1, fxChestSync: 1, fxNChestSync: 1, fxPlacedSync: 1, fxBlockSync: 1, fxrSync: 1, };   // 本人確認の前でも使えるもの（チャット専用の接続・読むだけの同期）
 
 io.on('connection', (socket) => {
   const on = function (ev, fn) {
@@ -517,7 +535,7 @@ io.on('connection', (socket) => {
       } else if (FX_BAD_NAMES.indexOf(name.toLowerCase()) >= 0) { deny('noname', '名前が読み込まれていません'); return; }
       if (players[socket.id] || !socket.connected) { joining = false; return; }
       joining = false;
-      for (const s of Object.keys(players)) { if (players[s].id === rawId) { deny('dup', 'このアカウントは、すでにオンラインです'); return; } }
+      const dups = Object.keys(players).filter((s) => players[s].id === rawId && s !== socket.id);   // ★同じアカウントで前から入っている接続（あとで切る）
       players[socket.id] = {
         id: rawId,
         name: name,
@@ -526,6 +544,7 @@ io.on('connection', (socket) => {
         velX: 0, velZ: 0, lastUpdateT: 0, lastGodHitAt: 0
       };
       console.log('参加:', name);
+            dups.forEach((s) => { io.to(s).emit('youWereKicked', {}); const old = io.sockets.sockets.get(s); if (old) old.disconnect(true); });   // ★前にいた人を、新しい人を入れたあとで切る
       socket.join(GAME_ROOM);
       fxOwnerRefresh(false).catch(() => {});   // さっきの確認の記憶を使うので、GASにはもう聞かない
       socket.emit('crateUpdate', onlineCrates);
@@ -535,6 +554,8 @@ io.on('connection', (socket) => {
       fxPlaneLast.forEach((pay, psid) => { if (psid !== socket.id && players[psid]) socket.emit('plRemote', pay); });   // ★いま出ている飛行機（止まっているものも）を、入ってきた人に教える
     })().catch((e) => { console.error('[join]', e && e.message); deny('busy', '本人確認でエラーが出ました'); });
   });
+
+        socket.emit('fxrList', fxrSnapshot());
 
   on('updateState', (d) => {
     const p = players[socket.id];
@@ -982,6 +1003,79 @@ io.on('connection', (socket) => {
     if (fresh.length) io.emit('fxMapBroken', { keys: fresh, remain: FX_MAP_RESTORE_MS });
   });
 
+    // ---- ★線路とトロッコ ----
+  on('fxrSync', () => { socket.emit('fxrList', fxrSnapshot()); });
+  on('fxrPlace', (d) => {
+    const p = players[socket.id], c = fxCell(d);
+    if (!p || !c) return;
+    const deny = (why) => socket.emit('fxrDenied', { act: 'rail', x: c[0], y: c[1], z: c[2], reason: why });
+    if (!fxRate(p, 'rail', 8, 12)) { deny('速すぎます。少しゆっくり置いてください'); return; }
+    if (p.y >= NETHER_Y) { deny('ネザーでは使えません'); return; }
+    if (c[0] < -FX_BLOCK_HALF || c[0] + 1 > FX_BLOCK_HALF || c[2] < -FX_BLOCK_HALF || c[2] + 1 > FX_BLOCK_HALF || c[1] < 0 || c[1] > FX_BLOCK_MAX_Y) { deny('そこには置けません'); return; }
+    if (!fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) { deny('遠すぎます。近づいてください'); return; }
+    const key = fxKeyOf(c[0], c[1], c[2]);
+    if (fxRails.has(key) || fxBlocks.has(key)) { deny('そこにはもう物があります'); return; }
+    const own = fxOwnerKey(p, socket.id);
+    if (fxRails.size >= FXR_MAX_RAILS) { deny('線路は、みんなで合計 ' + FXR_MAX_RAILS + ' 本までです'); return; }
+    if ((fxRailOwned[own] || 0) >= FXR_MAX_RAILS_PER) { deny('あなたが置いておける線路は ' + FXR_MAX_RAILS_PER + ' 本までです'); return; }
+    const ax = d.ax === 'z' ? 'z' : 'x';
+    fxRails.set(key, { x: c[0], y: c[1], z: c[2], ax: ax, owner: own });
+    fxRailOwned[own] = (fxRailOwned[own] || 0) + 1;
+    io.to(GAME_ROOM).emit('fxrAdd', { x: c[0], y: c[1], z: c[2], ax: ax });
+  });
+  on('fxrBreak', (d) => {
+    const p = players[socket.id], c = fxCell(d);
+    if (!p || !c || !fxRate(p, 'railb', 10, 14)) return;
+    const key = fxKeyOf(c[0], c[1], c[2]), r = fxRails.get(key);
+    if (!r || !fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) return;
+    fxRails.delete(key);
+    const n = (fxRailOwned[r.owner] || 1) - 1;
+    if (n > 0) fxRailOwned[r.owner] = n; else delete fxRailOwned[r.owner];
+    io.to(GAME_ROOM).emit('fxrRemove', { key: key });
+  });
+  on('fxrCartSpawn', (d) => {
+    const p = players[socket.id], c = fxCell(d);
+    if (!p || !c || !fxRate(p, 'cart', 2, 4)) return;
+    const deny = (why) => socket.emit('fxrDenied', { act: 'cart', reason: why });
+    if (!fxRails.has(fxKeyOf(c[0], c[1], c[2]))) { deny('線路の上に置いてください'); return; }
+    if (!fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) { deny('遠すぎます。近づいてください'); return; }
+    const own = fxOwnerKey(p, socket.id);
+    let mine = 0; fxCarts.forEach((k) => { if (k.owner === own) mine++; });
+    if (mine >= FXR_MAX_CARTS_PER) { deny('あなたが置いておけるトロッコは ' + FXR_MAX_CARTS_PER + ' 台までです'); return; }
+    if (fxCarts.size >= FXR_MAX_CARTS) { deny('トロッコは、みんなで合計 ' + FXR_MAX_CARTS + ' 台までです'); return; }
+    let dx = Math.sign(Number(d.dx) || 0), dz = Math.sign(Number(d.dz) || 0);
+    if (Math.abs(dx) + Math.abs(dz) !== 1) { dx = 1; dz = 0; }
+    const cart = { id: 'k' + (++fxCartSeq), x: c[0] + 0.5, y: c[1], z: c[2] + 0.5, dx: dx, dz: dz, sp: 0, rider: null, owner: own };
+    fxCarts.set(cart.id, cart);
+    io.to(GAME_ROOM).emit('fxrCartAdd', fxCartInfo(cart));
+  });
+  on('fxrCartBoard', (d) => {
+    const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
+    if (!p || !cart || !fxRate(p, 'cartb', 2, 4)) return;
+    if (cart.rider && cart.rider !== socket.id && players[cart.rider]) { socket.emit('fxrDenied', { act: 'board', reason: '誰かが乗っています' }); return; }
+    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) { socket.emit('fxrDenied', { act: 'board', reason: '遠すぎます。近づいてください' }); return; }
+    fxrFreeRider(socket.id);
+    cart.rider = socket.id;
+    io.to(GAME_ROOM).emit('fxrCartRider', { id: cart.id, rider: socket.id });
+    socket.emit('fxrBoarded', { id: cart.id });
+  });
+  on('fxrCartLeave', () => { fxrFreeRider(socket.id); });
+  on('fxrCartState', (d) => {
+    const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
+    if (!p || !cart || cart.rider !== socket.id || !fxRate(p, 'cartS', 25, 40)) return;
+    cart.x = fxNum(d.x, 400); cart.y = fxNum(d.y, 400); cart.z = fxNum(d.z, 400); cart.sp = fxNum(d.sp, 60);
+    cart.dx = Math.sign(Number(d.dx) || 0); cart.dz = Math.sign(Number(d.dz) || 0);
+    if (Math.abs(cart.dx) + Math.abs(cart.dz) !== 1) { cart.dx = 1; cart.dz = 0; }
+    socket.to(GAME_ROOM).emit('fxrCartState', { id: cart.id, x: cart.x, y: cart.y, z: cart.z, dx: cart.dx, dz: cart.dz, sp: cart.sp });
+  });
+  on('fxrCartRemove', (d) => {
+    const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
+    if (!p || !cart || (cart.rider && players[cart.rider])) return;
+    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) return;
+    fxCarts.delete(cart.id);
+    io.to(GAME_ROOM).emit('fxrCartGone', { id: cart.id });
+  });
+
   // ---- チャット ----
   on('chatMessage', (d) => {
     const p = players[socket.id];
@@ -1032,10 +1126,11 @@ io.on('connection', (socket) => {
   on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     fxPlaneLast.delete(socket.id);   // ★飛行機の記憶も消す
+        fxrFreeRider(socket.id);   // ★乗っていたトロッコを空きにする
     if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
-    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); }   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
+    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); fxrResetAll();}   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
     for (const id of Object.keys(fxPlaced)) {
       if (fxPlaced[id].ownerSid === socket.id) { delete fxPlaced[id]; io.emit('fxPlacedRemove', { id: id, reason: 'left' }); }
     }
