@@ -31,7 +31,7 @@ const SERVER_VERSION = 16;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbxzgDW5fnSzU0Y_umyxHmbkw3zWkyR5mcBE-ALiS7urpqoQ9sLewMp7F4iBuPzOutQ/exec';   // ★★ここに、GAS の「ウェブアプリのURL」（ゲームの画面が使っているのと同じもの）を入れてください。空のままだと、/kick も BAN杖も、だれも使えません（安全側）
-const FX_BAN_SHOW_MS = 4000;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
+const FX_BAN_SHOW_MS = 3500;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
 const fxPlaneLast = new Map();         // ★飛行機の最後の状態：socket.id → 配った内容（あとから入った人に、止まっている飛行機も見せるため）
@@ -490,7 +490,7 @@ function fxrFreeRider(sid) {   // この人が乗っているトロッコを、�
 // ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
 // 流れ：申請(invite) → 承認で画面が開く(open) → 両方が承認すると5秒のカウントダウン → 差し出す物を両方の手元から外す(locking)
 //       → KP があれば GAS で一度に入れ替える(paying) → 双方に受け取りを知らせる(done)。どこかで失敗したら、外した物は元に戻します
-const TRADE_SECRET = '';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
+const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ文字列
 const TRD_INVITE_MS = 60000, TRD_COUNTDOWN_MS = 5000, TRD_LOCK_TIMEOUT_MS = 8000, TRD_MAX_ITEMS = 16, TRD_KP_MAX = 1000000000;
 const trades = new Map();    // 取引の番号 → 取引
 const tradeOf = new Map();   // socket.id → 取引の番号（1人につき同時に1つだけ）
