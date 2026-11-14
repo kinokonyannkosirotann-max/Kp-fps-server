@@ -27,7 +27,7 @@ const io = new Server(server, {
 
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.19・トレード／Bot BAN／飛行機同期つき）'));
 
-const SERVER_VERSION = 16;
+const SERVER_VERSION = 19;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbycCM-b4iac28uf-8jOTS86OOzjuJlFexVQ4xeyfJa2Lmf6dsKrbZpYrLFfvqrJxlU/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
@@ -110,11 +110,11 @@ const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（ク�
 const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
 const FX_GOD_MAX_DAMAGE = 250;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
-const FIELD_HALF = 125;          // Botや箱が出てくる範囲（元のフィールドの半幅）
-const WORLD_HALF = 150;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
+const FIELD_HALF = 225;          // Botや箱が出てくる範囲（元のフィールドの半幅）
+const WORLD_HALF = 250;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
-const SPAWN_Y = 96;              // 参加した直後の高さ（塔のてっぺん）
+const SPAWN_Y = 100;              // 参加した直後の高さ（塔のてっぺん）
 const NETHER_Y = 900;            // これより上にいる人は「ネザーにいる」
 const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上限（塔のてっぺんは約92m）
 
@@ -490,7 +490,7 @@ function fxrFreeRider(sid) {   // この人が乗っているトロッコを、�
 // ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
 // 流れ：申請(invite) → 承認で画面が開く(open) → 両方が承認すると5秒のカウントダウン → 差し出す物を両方の手元から外す(locking)
 //       → KP があれば GAS で一度に入れ替える(paying) → 双方に受け取りを知らせる(done)。どこかで失敗したら、外した物は元に戻します
-const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ文字列
+const TRADE_SECRET = '';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
 const TRD_INVITE_MS = 60000, TRD_COUNTDOWN_MS = 5000, TRD_LOCK_TIMEOUT_MS = 8000, TRD_MAX_ITEMS = 16, TRD_KP_MAX = 1000000000;
 const trades = new Map();    // 取引の番号 → 取引
 const tradeOf = new Map();   // socket.id → 取引の番号（1人につき同時に1つだけ）
@@ -925,7 +925,9 @@ io.on('connection', (socket) => {
   });
   on('trdOffer', (d) => {
     const me = players[socket.id]; const tr = trdGet(d, ['open']); if (!tr || !me || !fxRate(me, 'trdOff', 8, 14)) return;
-    tr.offer[socket.id] = trdCleanOffer(d.items, d.kp);
+    const next = trdCleanOffer(d.items, d.kp);
+    if (JSON.stringify(next) === JSON.stringify(tr.offer[socket.id])) return;   // ★内容が同じなら何もしない（「承認」を押す直前にも最新の内容が送られてくるので、ここで相手の承認を消さないように）
+    tr.offer[socket.id] = next;
     tr.ok[tr.a] = false; tr.ok[tr.b] = false; trdClear(tr);   // 内容が変わったら、承認もカウントダウンもやり直し
     trdPush(tr);
   });
