@@ -1,5 +1,9 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.18 ＋ 飛行機の同期つき）
+//  KP銃ゲー オンライン対戦サーバー（ver.19：ver.18 ＋ トレード（/trade）＋ BAN杖で Bot をBAN）
+//   ★ver.19 の追加：トレードの中継（申請→承認→両者承認で5秒→交換）／ Owner の BAN杖で Bot を倒す fxBanBot
+//   ★KP を含むトレードには、下の TRADE_SECRET（GAS の FX38_SECRET と同じ文字列）が要ります
+//
+//  ↓ ここから下は ver.18 のときの説明です
 //   ★今回の変更は「飛行機」だけです（ほかの動きは、今のサーバーと同じ）
 //    ・飛行機の最後の状態をサーバーが覚える → あとから入ってきた人にも、止まっている飛行機が見える
 //    ・飛行機を片づけた／持ち主が抜けた時は、覚えていた状態も消す
@@ -21,7 +25,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.18・飛行機同期つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.19・トレード／Bot BAN／飛行機同期つき）'));
 
 const SERVER_VERSION = 16;
 
@@ -104,10 +108,10 @@ const FX_STEAL_WINDOW_MS = 20 * 1000;   // 倒してから、この時間の間�
 const FX_SHOT_MAX_PER_SEC = 60;         // 1人が1秒に送れる「撃った知らせ」の数（ミニガン・台座を何台か置いても足りる数）
 const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（クライアントの FX18_SLOW_MUL と同じ）
 const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
-const FX_GOD_MAX_DAMAGE = 350;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
+const FX_GOD_MAX_DAMAGE = 250;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
-const FIELD_HALF = 225;          // Botや箱が出てくる範囲（元のフィールドの半幅）
-const WORLD_HALF = 360;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
+const FIELD_HALF = 125;          // Botや箱が出てくる範囲（元のフィールドの半幅）
+const WORLD_HALF = 150;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
 const SPAWN_Y = 96;              // 参加した直後の高さ（塔のてっぺん）
@@ -483,6 +487,81 @@ function fxrFreeRider(sid) {   // この人が乗っているトロッコを、�
   fxCarts.forEach((c) => { if (c.rider === sid) { c.rider = null; c.sp = 0; io.to(GAME_ROOM).emit('fxrCartRider', { id: c.id, rider: null }); } });
 }
 
+// ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
+// 流れ：申請(invite) → 承認で画面が開く(open) → 両方が承認すると5秒のカウントダウン → 差し出す物を両方の手元から外す(locking)
+//       → KP があれば GAS で一度に入れ替える(paying) → 双方に受け取りを知らせる(done)。どこかで失敗したら、外した物は元に戻します
+const TRADE_SECRET = '';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
+const TRD_INVITE_MS = 60000, TRD_COUNTDOWN_MS = 5000, TRD_LOCK_TIMEOUT_MS = 8000, TRD_MAX_ITEMS = 16, TRD_KP_MAX = 1000000000;
+const trades = new Map();    // 取引の番号 → 取引
+const tradeOf = new Map();   // socket.id → 取引の番号（1人につき同時に1つだけ）
+let trdSeq = 0;
+function trdCleanItem(e) {
+  if (!e || typeof e !== 'object') return null;
+  const k = e.k; if (k !== 'w' && k !== 'i' && k !== 'a') return null;
+  const id = String(e.id || ''); if (!/^[A-Za-z0-9_\-]{1,64}$/.test(id) || id === 'banrod') return null;
+  const at = String(e.at || '');
+  return { k: k, id: id, n: k === 'i' ? Math.max(1, Math.min(9999, Math.floor(Number(e.n)) || 1)) : 1, am: k === 'w' ? Math.max(0, Math.min(99999, Math.floor(Number(e.am)) || 0)) : 0, at: (k === 'w' && /^[A-Za-z0-9_\-]{1,40}$/.test(at)) ? at : '' };
+}
+function trdCleanOffer(items, kp) {
+  const out = [], seen = {};
+  (Array.isArray(items) ? items : []).forEach((x) => { const c = trdCleanItem(x); if (!c || out.length >= TRD_MAX_ITEMS) return; const key = c.k + ':' + c.id; if (seen[key]) return; seen[key] = 1; out.push(c); });
+  return { items: out, kp: Math.max(0, Math.min(TRD_KP_MAX, Math.floor(Number(kp)) || 0)) };
+}
+function trdOther(tr, sid) { return sid === tr.a ? tr.b : tr.a; }
+function trdName(sid) { return players[sid] ? players[sid].name : '相手'; }
+function trdView(tr, sid) {
+  const o = trdOther(tr, sid);
+  return { tid: tr.id, mine: tr.offer[sid], theirs: tr.offer[o], okMe: !!tr.ok[sid], okPeer: !!tr.ok[o], cdMs: tr.cdAt ? Math.max(0, tr.cdAt - Date.now()) : 0 };
+}
+function trdPush(tr) { [tr.a, tr.b].forEach((sid) => { io.to(sid).emit('trdUpdate', trdView(tr, sid)); }); }
+function trdClear(tr) { clearTimeout(tr.cdTimer); clearTimeout(tr.lockTimer); clearTimeout(tr.inviteTimer); tr.cdTimer = tr.lockTimer = tr.inviteTimer = null; tr.cdAt = 0; }
+function trdDrop(tr) { trdClear(tr); tr.dead = true; trades.delete(tr.id); if (tradeOf.get(tr.a) === tr.id) tradeOf.delete(tr.a); if (tradeOf.get(tr.b) === tr.id) tradeOf.delete(tr.b); }
+function trdEnd(tr, msgFor) {   // 取引を終わらせる。msgFor = { sid: 'その人に出す文章' }。差し出す物を外していた人には、元に戻す知らせも送る
+  if (tr.dead) return;
+  const locked = (tr.phase === 'locking' || tr.phase === 'paying') ? tr.lockedOk : {};
+  trdDrop(tr);
+  [tr.a, tr.b].forEach((sid) => {
+    if (locked[sid] === true) io.to(sid).emit('trdRollback', { tid: tr.id });
+    io.to(sid).emit('trdEnd', { tid: tr.id, msg: (msgFor && msgFor[sid]) || '' });
+  });
+}
+function trdStartCountdown(tr) {
+  trdClear(tr);
+  tr.cdAt = Date.now() + TRD_COUNTDOWN_MS;
+  tr.cdTimer = setTimeout(() => { tr.cdTimer = null; if (!tr.dead && tr.phase === 'open' && tr.ok[tr.a] && tr.ok[tr.b]) trdStartLock(tr); }, TRD_COUNTDOWN_MS);
+}
+function trdStartLock(tr) {
+  tr.phase = 'locking'; tr.cdAt = 0; tr.lockedOk = {};
+  [tr.a, tr.b].forEach((sid) => { io.to(sid).emit('trdLock', { tid: tr.id, give: tr.offer[sid].items, get: tr.offer[trdOther(tr, sid)].items }); });
+  tr.lockTimer = setTimeout(() => { tr.lockTimer = null; const m = 'トレードの準備に時間がかかりすぎたので、取りやめました'; trdEnd(tr, { [tr.a]: m, [tr.b]: m }); }, TRD_LOCK_TIMEOUT_MS);
+}
+async function trdFinish(tr) {
+  tr.phase = 'paying'; clearTimeout(tr.lockTimer); tr.lockTimer = null;
+  const a = tr.a, b = tr.b, oa = tr.offer[a], ob = tr.offer[b];
+  let pa = null, pb = null;
+  if (oa.kp > 0 || ob.kp > 0) {
+    const A = players[a], B = players[b];
+    const fail = (m) => trdEnd(tr, { [a]: m, [b]: m });
+    if (!TRADE_SECRET) { fail('このサーバーは、KP のトレードにまだ対応していません（TRADE_SECRET が未設定です）'); return; }
+    if (!A || !B || !A.id || !B.id) { fail('相手がいなくなったので、取りやめました'); return; }
+    const j = await fxGasPost({ action: 'fpsTradeKp', secret: TRADE_SECRET, aId: A.id, bId: B.id, aGive: oa.kp, bGive: ob.kp });
+    if (!j || j.status !== 'success') { fail('KP の受け渡しに失敗したので、取りやめました：' + ((j && j.msg) || 'GAS につながりません')); return; }
+    pa = Number(j.aPoint); pb = Number(j.bPoint);
+  }
+  if (tr.dead) return;
+  trdDrop(tr);
+  io.to(a).emit('trdDone', { tid: tr.id, get: ob.items, kpGet: ob.kp, kpGive: oa.kp, point: pa });
+  io.to(b).emit('trdDone', { tid: tr.id, get: oa.items, kpGet: oa.kp, kpGive: ob.kp, point: pb });
+  console.log('トレード成立:', trdName(a), '⇄', trdName(b), '／', oa.items.length + '品+' + oa.kp + 'KP', '⇄', ob.items.length + '品+' + ob.kp + 'KP');
+}
+function trdLeft(sid) {   // 誰かが抜けた
+  const tid = tradeOf.get(sid), tr = tid && trades.get(tid);
+  if (!tr || tr.dead) return;
+  if (tr.phase === 'paying') { tr.gone = tr.gone || {}; tr.gone[sid] = true; return; }   // 受け渡しの最中。残った人には、結果が届く
+  const o = trdOther(tr, sid), nm = trdName(sid);
+  trdEnd(tr, { [o]: nm + ' が退出したので、トレードは取りやめになりました' });
+}
+
 const FX_PRE_JOIN_OK = { join: 1, disconnect: 1, fxOwnerAsk: 1, chatJoin: 1, dmMessage: 1, groupMessage: 1, fxChestSync: 1, fxNChestSync: 1, fxPlacedSync: 1, fxBlockSync: 1, fxrSync: 1, };   // 本人確認の前でも使えるもの（チャット専用の接続・読むだけの同期）
 
 io.on('connection', (socket) => {
@@ -806,6 +885,73 @@ io.on('connection', (socket) => {
     }, FX_BAN_SHOW_MS);
   });
   
+  // ---- ★BAN杖：Owner が Bot をBAN（演出はクライアントだけ。ここでは、Bot を死んだ扱いにするだけ） ----
+  on('fxBanBot', (d) => {
+    const me = players[socket.id];
+    if (!me || !me.owner || !d || !fxRate(me, 'banBot', 2, 3)) return;
+    const bot = bots.find(b => b.id === d.botId);
+    if (!bot || bot.health <= 0) return;
+    bot.health = 0;
+    io.emit('botKilled', { botId: bot.id, killerId: null, killerName: '⛧ BAN杖' });
+    respawnBotLater(bot);
+  });
+
+  // ---- ★トレード（/trade） ----
+  const trdGet = (d, phases) => { const tr = d && trades.get(String(d.tid)); if (!tr || tr.dead || (tr.a !== socket.id && tr.b !== socket.id)) return null; if (phases && phases.indexOf(tr.phase) < 0) return null; return tr; };
+  on('trdRequest', (d) => {
+    const me = players[socket.id]; if (!me || !d || !fxRate(me, 'trdReq', 1, 3)) return;
+    const reply = (msg) => socket.emit('trdMsg', { msg: msg });
+    const tsid = String(d.targetSid || ''), t = players[tsid];
+    if (!t) { reply('その人は、もうオンラインにいません'); return; }
+    if (tsid === socket.id) { reply('自分とはトレードできません'); return; }
+    if (tradeOf.has(socket.id)) { reply('すでにトレード中（または申請中）です'); return; }
+    if (tradeOf.has(tsid)) { reply(t.name + ' は、ほかのトレード中です'); return; }
+    const tr = { id: 't' + (++trdSeq) + '_' + Math.random().toString(36).slice(2, 7), a: socket.id, b: tsid, phase: 'invite', offer: {}, ok: {}, lockedOk: {}, cdAt: 0, cdTimer: null, lockTimer: null, inviteTimer: null, dead: false };
+    tr.offer[tr.a] = { items: [], kp: 0 }; tr.offer[tr.b] = { items: [], kp: 0 }; tr.ok[tr.a] = false; tr.ok[tr.b] = false;
+    trades.set(tr.id, tr); tradeOf.set(tr.a, tr.id); tradeOf.set(tr.b, tr.id);
+    tr.inviteTimer = setTimeout(() => { tr.inviteTimer = null; if (tr.phase === 'invite') trdEnd(tr, { [tr.a]: t.name + ' からの返事がなかったので、申請は取り消されました', [tr.b]: '' }); }, TRD_INVITE_MS);
+    io.to(tsid).emit('trdInvite', { tid: tr.id, fromName: me.name });
+    reply(t.name + ' にトレード申請を送りました（' + (TRD_INVITE_MS / 1000) + '秒以内に承認されると、画面が開きます）');
+  });
+  on('trdAccept', (d) => {
+    const tr = trdGet(d, ['invite']); if (!tr || tr.b !== socket.id) { if (d) socket.emit('trdMsg', { msg: 'その申請は、もう無効です' }); return; }
+    clearTimeout(tr.inviteTimer); tr.inviteTimer = null; tr.phase = 'open';
+    io.to(tr.a).emit('trdOpen', { tid: tr.id, peerName: trdName(tr.b) });
+    io.to(tr.b).emit('trdOpen', { tid: tr.id, peerName: trdName(tr.a) });
+  });
+  on('trdDecline', (d) => {
+    const tr = trdGet(d, ['invite']); if (!tr || tr.b !== socket.id) return;
+    trdEnd(tr, { [tr.a]: trdName(tr.b) + ' がトレードを断りました' });
+  });
+  on('trdOffer', (d) => {
+    const me = players[socket.id]; const tr = trdGet(d, ['open']); if (!tr || !me || !fxRate(me, 'trdOff', 8, 14)) return;
+    tr.offer[socket.id] = trdCleanOffer(d.items, d.kp);
+    tr.ok[tr.a] = false; tr.ok[tr.b] = false; trdClear(tr);   // 内容が変わったら、承認もカウントダウンもやり直し
+    trdPush(tr);
+  });
+  on('trdOk', (d) => {
+    const tr = trdGet(d, ['open']); if (!tr) return;
+    tr.ok[socket.id] = !!d.ok;
+    if (!tr.ok[socket.id]) { trdClear(tr); }
+    else if (tr.ok[tr.a] && tr.ok[tr.b]) {
+      const e = (o) => o.items.length === 0 && o.kp === 0;
+      if (e(tr.offer[tr.a]) && e(tr.offer[tr.b])) { tr.ok[tr.a] = false; tr.ok[tr.b] = false; [tr.a, tr.b].forEach((s) => io.to(s).emit('trdMsg', { msg: 'ふたりとも何も出していないので、交換できません' })); }
+      else trdStartCountdown(tr);
+    }
+    trdPush(tr);
+  });
+  on('trdCancel', (d) => {
+    const tr = trdGet(d, ['invite', 'open', 'locking']); if (!tr) return;
+    const o = trdOther(tr, socket.id), nm = trdName(socket.id);
+    trdEnd(tr, { [o]: nm + ' がトレードを中止しました' });
+  });
+  on('trdLocked', (d) => {
+    const tr = trdGet(d, ['locking']); if (!tr) return;
+    if (!d.ok) { const nm = trdName(socket.id), o = trdOther(tr, socket.id), why = String(d.msg || '').slice(0, 80); tr.lockedOk[socket.id] = false; trdEnd(tr, { [socket.id]: 'トレードできませんでした：' + why, [o]: nm + ' 側でトレードできませんでした（' + why + '）' }); return; }
+    tr.lockedOk[socket.id] = true;
+    if (tr.lockedOk[tr.a] === true && tr.lockedOk[tr.b] === true) trdFinish(tr).catch((e) => { console.error('[trade]', e && e.message); trdEnd(tr, { [tr.a]: 'エラーでトレードを取りやめました', [tr.b]: 'エラーでトレードを取りやめました' }); });
+  });
+
   on('grantOrbital', (d) => {
     const me = players[socket.id];
     if (!me || !me.owner) return;   // ★Ownerだけ
@@ -1125,6 +1271,7 @@ io.on('connection', (socket) => {
 
   on('disconnect', () => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
+    try { trdLeft(socket.id); } catch (e) { console.error('[trade]', e); }   // ★トレード中なら、取りやめにする
     fxPlaneLast.delete(socket.id);   // ★飛行機の記憶も消す
         fxrFreeRider(socket.id);   // ★乗っていたトロッコを空きにする
     if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
@@ -1269,4 +1416,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.18・飛行機同期つき）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.19・トレード／Bot BAN／飛行機同期つき）起動しました。ポート: ' + PORT));
