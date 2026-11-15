@@ -78,7 +78,7 @@ async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceI
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
-const BCAST_KEEPALIVE_MS = 3000;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
+const BCAST_KEEPALIVE_MS = 3500;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
 const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1 };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
@@ -123,8 +123,8 @@ const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（ク�
 const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
 const FX_GOD_MAX_DAMAGE = 250;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
-const FIELD_HALF = 225;          // Botや箱が出てくる範囲（元のフィールドの半幅）
-const WORLD_HALF = 250;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
+const FIELD_HALF = 425;          // Botや箱が出てくる範囲（元のフィールドの半幅）
+const WORLD_HALF = 505;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
 const SPAWN_Y = 100;              // 参加した直後の高さ（塔のてっぺん）
