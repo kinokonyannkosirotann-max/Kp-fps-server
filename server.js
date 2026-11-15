@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.19：ver.18 ＋ トレード（/trade）＋ BAN杖で Bot をBAN）
+//  KP銃ゲー オンライン対戦サーバー（ver.20：ver.19 ＋ エリトラの傾き同期（fx39））
+//   ★ver.20 の追加：エリトラの傾き（roll）を updateState で受け取り、全員に配る（1行だけ）
 //   ★ver.19 の追加：トレードの中継（申請→承認→両者承認で5秒→交換）／ Owner の BAN杖で Bot を倒す fxBanBot
 //   ★KP を含むトレードには、下の TRADE_SECRET（GAS の FX38_SECRET と同じ文字列）が要ります
 //
@@ -25,7 +26,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.19・トレード／Bot BAN／飛行機同期つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.20・トレード／Bot BAN／飛行機／エリトラ傾き同期つき）'));
 
 const SERVER_VERSION = 19;
 
@@ -490,7 +491,7 @@ function fxrFreeRider(sid) {   // この人が乗っているトロッコを、�
 // ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
 // 流れ：申請(invite) → 承認で画面が開く(open) → 両方が承認すると5秒のカウントダウン → 差し出す物を両方の手元から外す(locking)
 //       → KP があれば GAS で一度に入れ替える(paying) → 双方に受け取りを知らせる(done)。どこかで失敗したら、外した物は元に戻します
-const TRADE_SECRET = '';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
+const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
 const TRD_INVITE_MS = 60000, TRD_COUNTDOWN_MS = 5000, TRD_LOCK_TIMEOUT_MS = 8000, TRD_MAX_ITEMS = 16, TRD_KP_MAX = 1000000000;
 const trades = new Map();    // 取引の番号 → 取引
 const tradeOf = new Map();   // socket.id → 取引の番号（1人につき同時に1つだけ）
@@ -655,6 +656,7 @@ io.on('connection', (socket) => {
     p.weaponId = String(d.weaponId || 'pistol').slice(0, 30);
     p.health = num(d.health, -1000, 1000, p.health);
     p.isGliding = !!d.isGliding; p.isParachuting = !!d.isParachuting;
+    p.roll = p.isGliding ? num(d.roll, -1.6, 1.6, 0) : 0;   // ★エリトラで傾いている角度（他の人の画面でも体が傾く）
   });
 
   let shotWinAt = 0, shotWinN = 0;
@@ -1418,4 +1420,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.19・トレード／Bot BAN／飛行機同期つき）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.20・トレード／Bot BAN／飛行機／エリトラ傾き同期つき）起動しました。ポート: ' + PORT));
