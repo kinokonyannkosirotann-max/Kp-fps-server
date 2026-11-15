@@ -21,11 +21,22 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
+// ★このサイトからの接続だけ受け付ける（ほかのサイトに置いた改造版は、つながらなくなる）
+const ALLOWED_ORIGIN_RE = /^https:\/\/([a-z0-9-]+\.)?point0\.pages\.dev$/;   // point0.pages.dev と、その直下のサブドメイン（Cloudflare のプレビュー用URL）
+const ALLOW_LOCAL = false;                                                   // true にすると、自分のパソコン（localhost）でのテストもできる
+const LOCAL_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+function originOk(o) { if (typeof o !== 'string' || !o) return false; if (ALLOWED_ORIGIN_RE.test(o)) return true; return ALLOW_LOCAL && LOCAL_RE.test(o); }
+let lastOriginWarnAt = 0;
 const io = new Server(server, {
-  cors: { origin: '*' },
+  cors: { origin: (o, cb) => cb(null, originOk(o)) },
+  allowRequest: (req, cb) => {
+    const o = req.headers.origin;
+    const ok = originOk(o);
+    if (!ok) { const t = Date.now(); if (t - lastOriginWarnAt > 5000) { lastOriginWarnAt = t; console.warn('[接続を断りました] 許可されていないサイト: ' + (o || '（Originなし）')); } }
+    cb(null, ok);
+  },
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
-
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.20・トレード／Bot BAN／飛行機／エリトラ傾き同期つき）'));
 
 const SERVER_VERSION = 19;
