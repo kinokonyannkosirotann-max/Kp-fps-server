@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.20：ver.19 ＋ エリトラの傾き同期（fx39））
+//  KP銃ゲー オンライン対戦サーバー（ver.21：ver.20 ＋ キログの武器名・ホームシールド同期（fx43・fx44））
+//   ★ver.21 の追加：killFeed に weaponId（倒した武器）を付ける／updateState の hs（ホームシールド中）を全員に配る
 //   ★ver.20 の追加：エリトラの傾き（roll）を updateState で受け取り、全員に配る（1行だけ）
 //   ★ver.19 の追加：トレードの中継（申請→承認→両者承認で5秒→交換）／ Owner の BAN杖で Bot を倒す fxBanBot
 //   ★KP を含むトレードには、下の TRADE_SECRET（GAS の FX38_SECRET と同じ文字列）が要ります
@@ -668,6 +669,7 @@ io.on('connection', (socket) => {
     p.health = num(d.health, -1000, 1000, p.health);
     p.isGliding = !!d.isGliding; p.isParachuting = !!d.isParachuting;
     p.roll = p.isGliding ? num(d.roll, -1.6, 1.6, 0) : 0;   // ★エリトラで傾いている角度（他の人の画面でも体が傾く）
+    p.hs = d.hs ? 1 : 0;                              // ★ホームボタンのシールド中（他の人の画面でも、まわりにバリアが見える）
   });
 
   let shotWinAt = 0, shotWinN = 0;
@@ -710,7 +712,7 @@ io.on('connection', (socket) => {
         if (slow > 0) payload.slowMs = slow;
       }
     }
-    target.lastHitBy = { sid: socket.id, at: now };   // 「だれに倒されたか」の確認に使う
+    target.lastHitBy = { sid: socket.id, at: now, w: String(d.weaponId || '').slice(0, 30) };   // 「だれに倒されたか」の確認に使う（★どの武器かも覚える：キログ用）
     io.to(tsid).emit('youWereHit', payload);
     socket.to(GAME_ROOM).emit('playerHitFlash', { targetId: tsid });
   });
@@ -722,9 +724,10 @@ io.on('connection', (socket) => {
     const lh = victim.lastHitBy;
     if (killerId && (killerId === socket.id || !players[killerId] || !lh || lh.sid !== killerId || Date.now() - lh.at > 15000)) killerId = null;   // ★自分で自分を「倒した」ことにしてKPを増やす不正を防ぐ
     const killerName = killerId ? players[killerId].name : ((d && d.killerName) ? String(d.killerName).slice(0, 30) : null);
+    const killWeapon = (killerId && lh && lh.sid === killerId) ? String(lh.w || '') : '';   // ★倒した武器（キログ用）
     victim.lastDeath = { at: Date.now(), killerId: killerId, weaponId: String(victim.weaponId || ''), used: false };
     victim.lastHitBy = null;
-    io.emit('killFeed', { victimId: socket.id, victimName: victim.name, killerId: killerId, killerName: killerName });
+    io.emit('killFeed', { victimId: socket.id, victimName: victim.name, killerId: killerId, killerName: killerName, weaponId: killWeapon });
   });
 
   on('weaponStolen', (d) => {   // 倒した人から「武器を受け取れた」の知らせ → 倒された人の手持ちから、その武器を消させる
