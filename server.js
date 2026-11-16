@@ -92,7 +92,7 @@ function publicPlayers() {   // みんなに送る形（中身は players と同
   }
   return out;
 }
-function publicBots() { return bots.filter(b => b.health > 0).map(b => ({ id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId })); }
+function publicBots() { return bots.filter(b => b.health > 0).map(b => { const o = { id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId }; if (b.boss) { o.boss = 1; o.hp = Math.round(b.health); o.maxHp = b.maxHp; o.name = BOSS_NAME; } return o; }); }
 const BOT_COUNT = 4;              //オンラインのbotの数
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
 // ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
@@ -261,7 +261,44 @@ function initBots() {
   }
 }
 initBots();
+// ===== 👹 ボスBot =====
+const BOSS_NAME = '👹 ボス・ゴーレム';
+const BOSS_FIRST_MS = 60 * 1000;          // サーバー起動から、最初のボスが出るまで
+const BOSS_RESPAWN_MS = 4 * 60 * 1000;    // 倒されてから、次のボスが出るまで
+const BOSS_BASE_HP = 1500;                // ボスのHP（1人のとき）
+const BOSS_HP_PER_PLAYER = 500;           // 2人目から、1人増えるごとに足すHP
+const BOSS_GUN = { gap: 1400, dmg: 9, n: 3, burstGap: 120, spread: 0.06, speed: 70, range: 48 };   // ボスの銃（ふつうのBotの約3倍の強さ）
+const BOSS_REWARD = { join: 8, top: 4, kill: 2 };   // 討伐報酬（1 = +30KP）。参加／最大ダメージ／とどめ。足し算です
+const BOSS_JOIN_MIN = 0.04;               // ボスのHPのこの割合（4%）以上のダメージを与えた人が「参加」
+const boss = { id: 'boss_0', boss: true, x: 0, y: BOT_REST_Y, vy: 0, z: 0, targetX: 0, targetZ: 0, health: 0, maxHp: BOSS_BASE_HP, weaponId: 'rifle', lastShot: 0, stunnedUntil: 0, slowUntil: 0, dmgBy: {}, lastHitSid: null };
+bots.push(boss);
+function spawnBoss() {
+  const n = Object.keys(players).length;
+  if (n === 0) { setTimeout(spawnBoss, 30 * 1000); return; }   // 誰もいない間は出さない
+  const p = randomSpot();
+  boss.maxHp = BOSS_BASE_HP + BOSS_HP_PER_PLAYER * Math.max(0, n - 1);
+  boss.health = boss.maxHp; boss.x = p.x; boss.z = p.z; boss.targetX = p.x; boss.targetZ = p.z; boss.y = BOT_REST_Y; boss.vy = 0;
+  boss.stunnedUntil = 0; boss.slowUntil = 0; boss.dmgBy = {}; boss.lastHitSid = null; boss.lastShot = 0;
+  io.emit('bossSpawn', { name: BOSS_NAME, maxHp: boss.maxHp });
+}
+function onBossDead(b) {
+  const rewards = {}; let topSid = null, top = 0;
+  for (const sid in b.dmgBy) {
+    if (!players[sid]) continue;
+    const dm = b.dmgBy[sid];
+    if (dm > top) { top = dm; topSid = sid; }
+    if (dm >= b.maxHp * BOSS_JOIN_MIN) rewards[sid] = BOSS_REWARD.join;
+  }
+  if (topSid) rewards[topSid] = (rewards[topSid] || 0) + BOSS_REWARD.top;
+  const ks = b.lastHitSid;
+  if (ks && players[ks]) rewards[ks] = (rewards[ks] || 0) + BOSS_REWARD.kill;
+  io.emit('bossDead', { name: BOSS_NAME, topName: topSid && players[topSid] ? players[topSid].name : '', killerName: ks && players[ks] ? players[ks].name : '', rewards: rewards });
+  b.dmgBy = {}; b.lastHitSid = null;
+  setTimeout(spawnBoss, BOSS_RESPAWN_MS);
+}
+setTimeout(spawnBoss, BOSS_FIRST_MS);
 function respawnBotLater(bot) {
+  if (bot.boss) { onBossDead(bot); return; }
   setTimeout(() => {
     const p = randomSpot();
     bot.health = 100; bot.x = p.x; bot.z = p.z; bot.y = BOT_REST_Y; bot.vy = 0; bot.stunnedUntil = 0; bot.slowUntil = 0;
@@ -774,16 +811,18 @@ io.on('connection', (socket) => {
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
-    bot.health -= num(d.damage, 0, 250, 0);
-    if (d.stunMs) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
+const dmgIn = num(d.damage, 0, 250, 0), hpBefore = bot.health;
+    bot.health -= dmgIn;
+    if (bot.boss) { bot.dmgBy[socket.id] = (bot.dmgBy[socket.id] || 0) + Math.min(dmgIn, hpBefore); bot.lastHitSid = socket.id; }
+    if (d.stunMs && !bot.boss) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
     const slowB = num(d.slowMs, 0, FX_SLOW_MAX_MS, 0);   // ★ゴッドライフルで撃たれたBotは、しばらく鈍足
-    if (slowB > 0) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
+    if (slowB > 0 && !bot.boss) bot.slowUntil = Math.max(bot.slowUntil || 0, Date.now() + slowB);
     socket.to(GAME_ROOM).emit('botHitFlash', { botId: bot.id }); // 本人は既にローカルで点滅済みなので、他の人にだけ知らせる
     if (bot.health <= 0) {
       const attacker = players[socket.id];
       io.emit('botKilled', { botId: bot.id, killerId: socket.id, killerName: attacker ? attacker.name : '???' });
       respawnBotLater(bot);
-    } else if (typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
+    } else if (!bot.boss && typeof d.kbX === 'number' && typeof d.kbZ === 'number') {
       const f = num(d.kbForce, 0, BOT_KB_MAX, 2);
       bot.x += num(d.kbX, -1.5, 1.5, 0) * f;
       bot.z += num(d.kbZ, -1.5, 1.5, 0) * f;
@@ -906,7 +945,7 @@ io.on('connection', (socket) => {
     const me = players[socket.id];
     if (!me || !me.owner || !d || !fxRate(me, 'banBot', 2, 3)) return;
     const bot = bots.find(b => b.id === d.botId);
-    if (!bot || bot.health <= 0) return;
+ if (!bot || bot.health <= 0 || bot.boss) return;
     bot.health = 0;
     io.emit('botKilled', { botId: bot.id, killerId: null, killerName: '⛧ BAN杖' });
     respawnBotLater(bot);
@@ -1384,7 +1423,7 @@ function botFireBullet(bot, gun, p, targetSid) {   // 1発（ショットガン�
       let damage = gun.dmg;
       if (pellets > 1) damage = gun.dmg * Math.round(pellets * Math.max(0, 1 - dist / gun.range));   // ショットガン：近いほど、粒がたくさん当たる
       damage = Math.round(damage);
-      if (damage > 0) io.to(targetSid).emit('youWereHit', { damage: damage, attackerName: '🤖 Bot', attackerId: null });
+      if (damage > 0) io.to(targetSid).emit('youWereHit', { damage: damage, attackerName: bot.boss ? BOSS_NAME : '🤖 Bot', attackerId: null });
     }
   }, bulletTravelMs);
 }
@@ -1412,7 +1451,7 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
         bot.x = moved.x; bot.z = moved.z;
       }
 
-      const gun = BOT_GUNS[bot.weaponId] || BOT_GUNS.pistol;   // ★持っている武器ごとに、撃つ間隔・連射・ダメージ・届く距離が違う
+  const gun = bot.boss ? BOSS_GUN : (BOT_GUNS[bot.weaponId] || BOT_GUNS.pistol);// ★持っている武器ごとに、撃つ間隔・連射・ダメージ・届く距離が違う
       if (now - bot.lastShot > gun.gap && nearestDist <= gun.range && !fxLineBlocked(bot.x, bot.y + 1.3, bot.z, nearest.x, nearest.y + 0.9, nearest.z)) {   // ★ブロックの壁の向こうからは撃ってこない
         bot.lastShot = now;
         botFireVolley(bot, gun, nearestSid);
