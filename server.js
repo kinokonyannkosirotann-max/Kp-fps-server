@@ -121,7 +121,7 @@ const FX_STEAL_WINDOW_MS = 20 * 1000;   // 倒してから、この時間の間�
 const FX_SHOT_MAX_PER_SEC = 60;         // 1人が1秒に送れる「撃った知らせ」の数（ミニガン・台座を何台か置いても足りる数）
 const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（クライアントの FX18_SLOW_MUL と同じ）
 const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
-const FX_GOD_MAX_DAMAGE = 250;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
+const FX_GOD_MAX_DAMAGE = 550;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
 const FIELD_HALF = 425;          // Botや箱が出てくる範囲（元のフィールドの半幅）
 const WORLD_HALF = 505;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
@@ -731,7 +731,7 @@ io.on('connection', (socket) => {
     const viaT = !!d.viaTurret && fxHasArmedTurret(socket.id);   // ★本当に「銃つきの台座」を持っている人の、台座の弾だけ
     if (!viaT && FX_ACTION_WINDOW_MS > 0 && now - (attacker.lastAct || 0) > FX_ACTION_WINDOW_MS) { fxViolation(socket, attacker, '撃っても振ってもいないのにダメージ'); return; }
     const orbital = FX_HIT_ORBITAL_RE.test(String(d.weaponId || '').slice(0, 30));
-    const dmg = num(d.damage, 0, 250, 0);
+    const dmg = num(d.damage, 0, 550, 0);
     if (!fxBucket(attacker, 'hitN', 60, 40, 1)) { fxViolation(socket, attacker, 'ヒットの数が多すぎる'); return; }
     if (dmg > 0 && !(orbital ? fxBucket(attacker, 'dmgO', 4000, 150, dmg) : fxBucket(attacker, 'dmgN', 900, 500, dmg))) { fxViolation(socket, attacker, 'ダメージの合計が多すぎる'); return; }
     const payload = { damage: dmg, attackerName: attacker.name + (viaT ? 'のタレット' : ''), attackerId: socket.id };
@@ -811,7 +811,7 @@ io.on('connection', (socket) => {
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
-const dmgIn = num(d.damage, 0, 250, 0), hpBefore = bot.health;
+const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     bot.health -= dmgIn;
     if (bot.boss) { bot.dmgBy[socket.id] = (bot.dmgBy[socket.id] || 0) + Math.min(dmgIn, hpBefore); bot.lastHitSid = socket.id; }
     if (d.stunMs && !bot.boss) bot.stunnedUntil = Date.now() + num(d.stunMs, 0, 6000, 0);
