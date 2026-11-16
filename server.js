@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.21：ver.20 ＋ キログの武器名・ホームシールド同期（fx43・fx44））
+//  KP銃ゲー オンライン対戦サーバー（ver.22：ver.21 ＋ ボスBot・/tell・/duel（決闘）・決闘場の落とし物5分）
+//   ★ver.22 の追加：ボスBot（bossSpawn／bossDead）／ /tell（whisper）／ /duel（duelAsk・duelReply・duelBack）／ 決闘場（高さ250以上）の落とし物は5分残す
 //   ★ver.21 の追加：killFeed に weaponId（倒した武器）を付ける／updateState の hs（ホームシールド中）を全員に配る
 //   ★ver.20 の追加：エリトラの傾き（roll）を updateState で受け取り、全員に配る（1行だけ）
 //   ★ver.19 の追加：トレードの中継（申請→承認→両者承認で5秒→交換）／ Owner の BAN杖で Bot を倒す fxBanBot
@@ -38,9 +39,9 @@ const io = new Server(server, {
   },
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
 });
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.20・トレード／Bot BAN／飛行機／エリトラ傾き同期つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.22・ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
-const SERVER_VERSION = 19;
+const SERVER_VERSION = 21;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
 const GAS_URL = 'https://script.google.com/macros/s/AKfycbycCM-b4iac28uf-8jOTS86OOzjuJlFexVQ4xeyfJa2Lmf6dsKrbZpYrLFfvqrJxlU/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
@@ -267,7 +268,7 @@ const BOSS_FIRST_MS = 60 * 1000;          // サーバー起動から、最初�
 const BOSS_RESPAWN_MS = 4 * 60 * 1000;    // 倒されてから、次のボスが出るまで
 const BOSS_BASE_HP = 1500;                // ボスのHP（1人のとき）
 const BOSS_HP_PER_PLAYER = 500;           // 2人目から、1人増えるごとに足すHP
-const BOSS_GUN = { gap: 1400, dmg: 9, n: 3, burstGap: 120, spread: 0.06, speed: 70, range: 48 };   // ボスの銃（ふつうのBotの約3倍の強さ）
+const BOSS_GUN = { gap: 1400, dmg: 9, n: 3, burstGap: 120, spread: 0.06, speed: 70, range: 40 };   // ボスの銃（ふつうのBotの約3倍の強さ）
 const BOSS_REWARD = { join: 8, top: 4, kill: 2 };   // 討伐報酬（1 = +30KP）。参加／最大ダメージ／とどめ。足し算です
 const BOSS_JOIN_MIN = 0.04;               // ボスのHPのこの割合（4%）以上のダメージを与えた人が「参加」
 const boss = { id: 'boss_0', boss: true, x: 0, y: BOT_REST_Y, vy: 0, z: 0, targetX: 0, targetZ: 0, health: 0, maxHp: BOSS_BASE_HP, weaponId: 'rifle', lastShot: 0, stunnedUntil: 0, slowUntil: 0, dmgBy: {}, lastHitSid: null };
@@ -726,6 +727,7 @@ io.on('connection', (socket) => {
     const tsid = String(d.targetId || '');
     const target = players[tsid];
     if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
+    if (duelActive(socket.id) !== duelActive(tsid)) return;   // 決闘場の中と外では、ダメージを出せない
     if (!(attacker.health > 0) || fxInSafeTower(attacker)) return;   // やられている人・出現の塔の上の人は、ダメージを出せない
     const now = Date.now();
     const viaT = !!d.viaTurret && fxHasArmedTurret(socket.id);   // ★本当に「銃つきの台座」を持っている人の、台座の弾だけ
@@ -765,6 +767,7 @@ io.on('connection', (socket) => {
     victim.lastDeath = { at: Date.now(), killerId: killerId, weaponId: String(victim.weaponId || ''), used: false };
     victim.lastHitBy = null;
     io.emit('killFeed', { victimId: socket.id, victimName: victim.name, killerId: killerId, killerName: killerName, weaponId: killWeapon });
+    duelOnDeath(socket.id);
   });
 
   on('weaponStolen', (d) => {   // 倒した人から「武器を受け取れた」の知らせ → 倒された人の手持ちから、その武器を消させる
@@ -1288,6 +1291,74 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
   });
 
+  // ---- /tell（特定の人にだけ送るメッセージ） ----
+  on('whisper', (d) => {
+    const me = players[socket.id];
+    if (!me || !d || !fxRate(me, 'whisper', 0.05, 15)) return;
+    const text = String(d.text || '').slice(0, 200);
+    if (!text) return;
+    const tn = String(d.targetName || '').trim().toLowerCase();
+    let tsid = null;
+    for (const sid in players) { if (sid !== socket.id && String(players[sid].name || '').toLowerCase() === tn) { tsid = sid; break; } }
+    if (!tsid) { socket.emit('whisperFail', { targetName: String(d.targetName || '').slice(0, 30) }); return; }
+    io.to(tsid).emit('whisperRecv', { from: me.name, text: text });
+  });
+
+  // ---- ⚔️ 決闘 ----
+  on('duelAsk', (d) => {
+    const me = players[socket.id];
+    if (!me || !d || !fxRate(me, 'duelAsk', 0.2, 3)) return;
+    const reply = (t) => socket.emit('duelMsg', { text: t });
+    const tn = String(d.targetName || '').trim().toLowerCase();
+    let tsid = null;
+    for (const s in players) { if (s !== socket.id && String(players[s].name || '').toLowerCase() === tn) { tsid = s; break; } }
+    if (!tsid) { socket.emit('duelEnd', { reason: 'cancel' }); return reply('その人は、いまオンラインにいません'); }
+    if (!(me.health > 0) || !(players[tsid].health > 0)) { socket.emit('duelEnd', { reason: 'cancel' }); return reply('やられている人とは決闘できません'); }
+    if (duelOf.has(socket.id)) return reply('いま決闘中（または申し込み中）です');
+    if (duelOf.has(tsid)) { socket.emit('duelEnd', { reason: 'cancel' }); return reply(players[tsid].name + ' は、ほかの決闘中（または申し込み中）です'); }
+    const du = { id: ++duelSeq, a: socket.id, b: tsid, phase: 'invite', backs: {}, winner: null, inviteT: null, lootT: null };
+    duels.set(du.id, du); duelOf.set(du.a, du); duelOf.set(du.b, du);
+    du.inviteT = setTimeout(() => {
+      if (du.phase !== 'invite') return;
+      if (players[du.a]) { io.to(du.a).emit('duelMsg', { text: (players[du.b] ? players[du.b].name : '相手') + ' から返事がなかったので、申し込みは取り消されました' }); io.to(du.a).emit('duelEnd', { reason: 'cancel' }); }
+      if (players[du.b]) io.to(du.b).emit('duelEnd', { reason: 'cancel' });
+      duelClear(du);
+    }, DUEL_INVITE_MS);
+    io.to(tsid).emit('duelInvite', { from: me.name, ms: DUEL_INVITE_MS });
+    reply(players[tsid].name + ' に決闘を申し込みました（60秒。取り消すなら /back）');
+  });
+  on('duelReply', (d) => {
+    const du = duelOf.get(socket.id);
+    if (!du || du.phase !== 'invite' || du.b !== socket.id) return;
+    clearTimeout(du.inviteT);
+    if (!d || !d.accept || !players[du.a] || !players[du.b]) {
+      if (players[du.a]) { io.to(du.a).emit('duelMsg', { text: (players[du.b] ? players[du.b].name : '相手') + ' に断られました' }); io.to(du.a).emit('duelEnd', { reason: 'cancel' }); }
+      io.to(du.b).emit('duelEnd', { reason: 'cancel' });
+      duelClear(du); return;
+    }
+    du.phase = 'fight';
+    io.to(du.a).emit('duelStart', { side: 0, opp: players[du.b].name });
+    io.to(du.b).emit('duelStart', { side: 1, opp: players[du.a].name });
+  });
+  on('duelBack', () => {
+    const me = players[socket.id], du = duelOf.get(socket.id);
+    if (!me || !du || !fxRate(me, 'duelBack', 1, 5)) return;
+    if (du.phase === 'invite') {       // 申し込んだ人が取り消す
+      if (du.a !== socket.id) return;
+      clearTimeout(du.inviteT);
+      io.to(du.b).emit('duelEnd', { reason: 'cancel' }); socket.emit('duelEnd', { reason: 'cancel' }); socket.emit('duelMsg', { text: '申し込みを取り消しました' });
+      duelClear(du); return;
+    }
+    if (du.phase === 'fight') {        // 戦い中は、2人とも /back で中断
+      du.backs[socket.id] = true;
+      const o = duelOther(du, socket.id);
+      if (du.backs[o]) { duelFinish(du, 'abort'); return; }
+      io.to(o).emit('duelMsg', { text: me.name + ' が中断を希望しています。同意するなら /back' });
+      return;
+    }
+    if (du.phase === 'loot' && du.winner === socket.id) duelFinish(du, 'back');   // 拾うタイム：勝った人は /back で帰れる
+  });
+
   // ---- 懸賞金のおしらせ（お金のやりとりは GAS で行う。ここは「知らせを配る」だけ）----
   on('bountyEvent', (d) => {
     const p = players[socket.id];
@@ -1332,6 +1403,7 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     fxPlaneLast.delete(socket.id);   // ★飛行機の記憶も消す
         fxrFreeRider(socket.id);   // ★乗っていたトロッコを空きにする
     if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
+    try { duelLeft(socket.id); } catch (e) { console.error('[duel]', e); }
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
     if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); fxrResetAll();}   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
@@ -1358,11 +1430,23 @@ setInterval(() => {   // ゲームに入っている人にだけ、全員の位�
   if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(GAME_ROOM).emit('botsUpdate', bl); }
 }, 100);
 
-setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える）
+setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える。決闘場の落とし物は5分）
   if (fxDrops.size === 0) return;
-  const now = Date.now(), gone = [];
-  for (const [did, r] of fxDrops) { if (now - r.born >= FX_DROP_LIFETIME_MS) { fxDrops.delete(did); gone.push(did); } }
+  const now = Date.now(), gone = [], redo = [];
+  for (const [did, r] of fxDrops) {
+    const duel = r.y >= DUEL_MIN_Y;
+    if (now - r.born >= (duel ? DUEL_LOOT_MS : FX_DROP_LIFETIME_MS)) { gone.push(did); }
+    else if (duel && now - (r.rb || r.born) >= 100 * 1000) redo.push(did);   // クライアントは150秒で見えなくするので、その前に出しなおす
+  }
+  const adds = [];
+  for (const did of gone) fxDrops.delete(did);
+  for (const did of redo) {
+    const r = fxDrops.get(did); if (!r) continue;
+    fxDrops.delete(did); gone.push(did);
+    r.did = ++fxDropSeq; r.rb = now; fxDrops.set(r.did, r); adds.push(fxDropPublic(r));
+  }
   if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
+  if (adds.length) io.to(GAME_ROOM).emit('fxDropAdd', { list: adds });
 }, 5000);
 
 setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重力で落ちてくる）
@@ -1468,9 +1552,48 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
   }
 }, 200);
 
+// ===== ⚔️ 決闘（/duel） =====
+const DUEL_INVITE_MS = 60 * 1000;      // 申し込みの有効時間
+const DUEL_LOOT_MS = 5 * 60 * 1000;    // 勝ったあと、落とし物を拾える時間
+const DUEL_MIN_Y = 250;                // 決闘場の高さ（クライアントの F47_Y=300 より少し下。この高さより上の落とし物は、5分間残す）
+const duels = new Map();               // 番号 → 決闘
+const duelOf = new Map();              // 人(socket.id) → 決闘
+let duelSeq = 0;
+function duelOther(d, sid) { return d.a === sid ? d.b : d.a; }
+function duelActive(sid) { const x = duelOf.get(sid); return x && x.phase !== 'invite' ? x : null; }   // 決闘場にいる（戦い中・拾うタイム）ならその決闘
+function duelClear(d) {
+  clearTimeout(d.inviteT); clearTimeout(d.lootT); duels.delete(d.id);
+  if (duelOf.get(d.a) === d) duelOf.delete(d.a);
+  if (duelOf.get(d.b) === d) duelOf.delete(d.b);
+}
+function duelFinish(d, reason) {       // reason: back／abort／time／left
+  const sids = d.phase === 'loot' ? [d.winner] : [d.a, d.b];
+  sids.forEach((s) => { if (players[s]) io.to(s).emit('duelEnd', { reason: reason }); });
+  duelClear(d);
+}
+function duelOnDeath(sid) {            // やられた人が出た（playerDied から呼ぶ）
+  const du = duelOf.get(sid);
+  if (!du || du.phase !== 'fight') return;
+  const w = duelOther(du, sid);
+  if (!players[w]) { duelClear(du); return; }
+  du.phase = 'loot'; du.winner = w; duelOf.delete(sid);
+  io.to(sid).emit('duelEnd', { reason: 'lose' });
+  io.to(w).emit('duelWin', { ms: DUEL_LOOT_MS });
+  du.lootT = setTimeout(() => duelFinish(du, 'time'), DUEL_LOOT_MS);
+}
+function duelLeft(sid) {               // 退出した（disconnect から呼ぶ）
+  const du = duelOf.get(sid);
+  if (!du) return;
+  if (du.phase === 'fight' || du.phase === 'invite') {
+    const o = duelOther(du, sid);
+    if (players[o]) { io.to(o).emit('duelMsg', { text: '相手が退出したので、決闘は終わりました' }); io.to(o).emit('duelEnd', { reason: du.phase === 'fight' ? 'left' : 'cancel' }); }
+  }
+  duelClear(du);
+}
+
 // どこかで想定外のエラーが起きても、サーバー全体は止めない（Render のログに出るだけ）
 process.on('uncaughtException', (e) => { console.error('[想定外のエラー]', e && e.message); });
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.20・トレード／Bot BAN／飛行機／エリトラ傾き同期つき）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.22・ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）起動しました。ポート: ' + PORT));
