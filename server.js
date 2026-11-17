@@ -44,7 +44,7 @@ app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼
 const SERVER_VERSION = 21;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbycCM-b4iac28uf-8jOTS86OOzjuJlFexVQ4xeyfJa2Lmf6dsKrbZpYrLFfvqrJxlU/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbzLXQO3ttdD1_mV4iD1R1K_hcKUeVTM3luNj9IuW7TfipQovGMGsG3Omq8A5e8gDXc/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 3500;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
@@ -76,6 +76,12 @@ async function fxIdentity(deviceId, fresh) {
 }
 async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceId, fresh); return !!(i && i.owner); }
 
+// ★ver.22：ここから下は「ワールド1つぶんの中身」。ワールドごとに別々に作られます（メイン＋個人サーバー）
+function createWorld(io, WCFG) {
+const IS_MAIN = !!WCFG.main;
+const _iv = [];   // このワールドの定期処理（ワールドを閉じる時に止めるため）
+const setInterval = function (fn, ms) { const h = global.setInterval(fn, ms); _iv.push(h); return h; };
+const pubInfo = function () { return IS_MAIN ? { main: true, id: 'main', name: 'メインワールド' } : { id: WCFG.id, name: WCFG.name, ownerName: WCFG.ownerName, dropOnDeath: WCFG.dropOnDeath, pvp: WCFG.pvp, blocks: WCFG.blocks, botCount: WCFG.botCount, half: WCFG.half, spawnMode: WCFG.spawnMode, spawnY: WCFG.spawnY, maxPlayers: WCFG.maxPlayers }; };
 const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
@@ -94,7 +100,7 @@ function publicPlayers() {   // みんなに送る形（中身は players と同
   return out;
 }
 function publicBots() { return bots.filter(b => b.health > 0).map(b => { const o = { id: b.id, x: round2(b.x), y: round2(b.y), z: round2(b.z), weaponId: b.weaponId }; if (b.boss) { o.boss = 1; o.hp = Math.round(b.health); o.maxHp = b.maxHp; o.name = BOSS_NAME; } return o; }); }
-const BOT_COUNT = 4;              //オンラインのbotの数
+const BOT_COUNT = IS_MAIN ? 4 : WCFG.botCount;              //オンラインのbotの数
 const BOT_BULLET_MUL = 1.7;      // ★クライアントの FX18_SPEED_ALL（全体の弾の速さの倍率）と同じ数字にしてください（見た目と当たる速さがそろいます）
 // ★Botの武器（確率で決まります）。数字を変えると、強さ・出やすさを調整できます
 //   w＝出やすさ（重み。合計に対する割合）／gap＝撃つ間隔(ms)／dmg＝1発のダメージ／n＝1回に何発ずつ撃つか／burstGap＝その連射の間隔(ms)
@@ -124,16 +130,16 @@ const BOT_SLOW_MUL = 0.4;        // ★鈍足中のBotの動きの速さ（ク�
 const FX_SLOW_MAX_MS = 10000;    // 鈍足の長さの上限（ズル対策）
 const FX_GOD_MAX_DAMAGE = 550;   // ゴッドライフル1発のダメージの上限（ふつうは34、頭で51、攻撃力アップの薬でも約100）
 const FX_GOD_MIN_GAP_MS = 150;   // ゴッドライフルの「特別な効果（防具無視・鈍足）」が付く最短の間隔（連射のズル対策。ふつうは260ms以上あきます）
-const FIELD_HALF = 425;          // Botや箱が出てくる範囲（元のフィールドの半幅）
-const WORLD_HALF = 505;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
+const FIELD_HALF = IS_MAIN ? 425 : WCFG.half;          // Botや箱が出てくる範囲（元のフィールドの半幅）
+const WORLD_HALF = IS_MAIN ? 505 : WCFG.half + 8;          // 歩ける全体の半幅（⑫-A で外側に広げた分も入れた数字。FX13_EXTRA を変えたら「105＋その数字」にする）
 const TOWER_SAFE_Y = 20;
 const ONLINE_TOWER = { x: 0, z: 0 };
-const SPAWN_Y = 100;              // 参加した直後の高さ（塔のてっぺん）
+const SPAWN_Y = (!IS_MAIN && WCFG.spawnMode === 'sky') ? WCFG.spawnY : 100;              // 参加した直後の高さ（塔のてっぺん）
 const NETHER_Y = 900;            // これより上にいる人は「ネザーにいる」
 const PLACE_MAX_Y = 130;         // 銃台座・地雷を置ける高さの上限（塔のてっぺんは約92m）
 
 // ---------- ブロック（クライアントの⑲）の決まり ----------
-const FX_BLOCK_MAX_TOTAL = 50000;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
+const FX_BLOCK_MAX_TOTAL = IS_MAIN ? 50000 : 5000;           // ★クライアントの FX19_MAX_PLACED と同じ数字にしてください（ブロックの合計の上限・みんなの分）
 const FX_BLOCK_MAX_PER_PLAYER = 1500;      // 1人が同時に置いておける数
 const FX_BLOCK_MAX_Y = 120;               // ★クライアントの FX19_MAX_Y と同じ数字に（置ける高さの上限）
 const FX_BLOCK_HALF = WORLD_HALF - 2;     // 置ける範囲（マップの半幅 − 2。クライアントと同じ考え方）
@@ -625,7 +631,9 @@ io.on('connection', (socket) => {
 
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
+  socket.emit('fxWorldInfo', pubInfo());
 
+  
   async function fxOwnerRefresh(fresh) {   // いまこの接続の人が Owner かを、GASで確かめて、本人に知らせる
     const p = players[socket.id];
     if (!p) return false;
@@ -646,6 +654,12 @@ io.on('connection', (socket) => {
     const deny = (why, msg) => { joining = false; socket.emit('fxJoinDenied', { why: why, msg: msg }); };
     if (rawId.length < 8 || rawId.length > 80 || rawId === socket.id) { deny('noid', 'アカウント情報の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
     if (!rawName) { deny('noname', '名前の読み込みが終わっていません。少し待ってから、もう一度入ってください'); return; }
+
+        if (!IS_MAIN) {
+      if (Object.keys(players).length >= WCFG.maxPlayers) { deny('full', 'このサーバーは満員です（' + WCFG.maxPlayers + '人）'); return; }
+      if (WCFG.pass && String((d && d.pass) || '') !== WCFG.pass) { deny('pass', '合言葉が違います'); return; }
+    }
+    
     const tb = fxTempBan.get(rawId);
     if (tb && tb > Date.now()) { deny('banned', '不正の疑いで、しばらく入れません（あと約' + Math.ceil((tb - Date.now()) / 60000) + '分）'); return; }
     joining = true;
@@ -722,6 +736,7 @@ io.on('connection', (socket) => {
   });
 
   on('hitPlayer', (d) => {
+        if (!IS_MAIN && !WCFG.pvp) return;   // ★個人サーバー：PvPなし
     const attacker = players[socket.id];
     if (!attacker || !d || typeof d !== 'object') return;
     const tsid = String(d.targetId || '');
@@ -783,6 +798,7 @@ io.on('connection', (socket) => {
   });
 
   on('fxDropSpawn', (d) => {   // ★落とし物を出す（やられた時・ゴミ箱・箱をこわした時）
+        if (!IS_MAIN && !WCFG.dropOnDeath && d && d.src === 'death') return;   // ★個人サーバー：死んでも落とさない
     const p = players[socket.id];
     if (!p || !d || !Array.isArray(d.list) || !fxRate(p, 'dropSpawn', 3, 8)) return;
     const src = (d.src === 'death' || d.src === 'crate') ? d.src : 'trash';
@@ -1158,6 +1174,7 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     socket.emit('fxBlockList', fxBlockSnapshot());
   });
   on('fxBlockPlace', (d) => {
+        if (!IS_MAIN && !WCFG.blocks) { const c0 = fxCell(d); if (c0) socket.emit('fxBlockDenied', { act: 'place', x: c0[0], y: c0[1], z: c0[2], reason: 'このサーバーではブロックを使えません' }); return; }
     const p = players[socket.id], c = fxCell(d);
     if (!p || !c) return;
     const deny = (why) => socket.emit('fxBlockDenied', { act: 'place', x: c[0], y: c[1], z: c[2], reason: why });
@@ -1590,6 +1607,108 @@ function duelLeft(sid) {               // 退出した（disconnect から呼ぶ
   }
   duelClear(du);
 }
+
+    return {
+    destroy: function () { _iv.forEach(function (h) { clearInterval(h); }); },   // このワールドの定期処理を止める
+    count: function () { return Object.keys(players).length; }
+  };
+}   // ← createWorld ここまで
+
+// ==========================================
+// 🏗️ ★ver.22：ワールド管理（メインワールド＋個人サーバー）
+//   ・メインワールド＝今までどおり（通常の接続口）／ 個人サーバー＝接続口 /w/<id> ごとに、別の createWorld を動かす
+//   ・個人サーバーの一覧・設定は GAS（シート「個人サーバー」）が持っている。起動時と、設定が変わった時に読み込む
+//   ・GET /worlds … 一覧（人数つき）／ POST /world/boot … 作った・設定を変えた・削除した、の知らせ（持ち主だけ）
+// ==========================================
+const WORLD_MAX = 40;                   // 同時に動かせる個人サーバーの数
+const WORLD_BOOT_GAP_MS = 8000;         // 同じサーバーの再起動は、この間隔(ms)あける（いたずら対策）
+const worlds = new Map();               // id → { cfg, inst, nsp }
+const worldBootAt = new Map();
+const mainWorld = createWorld(io, { main: true, id: 'main', name: 'メインワールド' });
+
+function wNorm(c) {   // GAS から来た設定を、安全な範囲に直す
+  const n = function (v, lo, hi, d) { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v))) : d; };
+  c = c || {};
+  return {
+    id: String(c.id || ''), name: String(c.name || 'サーバー').replace(/[<>]/g, '').slice(0, 16),
+    ownerId: String(c.ownerId || ''), ownerName: String(c.ownerName || '').slice(0, 24), pass: String(c.pass || '').slice(0, 12),
+    dropOnDeath: c.dropOnDeath !== false, pvp: c.pvp !== false, blocks: c.blocks !== false,
+    botCount: n(c.botCount, 0, 6, 2), half: n(c.half, 50, 150, 100),
+    spawnMode: ['tower', 'ground', 'sky'].indexOf(c.spawnMode) >= 0 ? c.spawnMode : 'tower', spawnY: n(c.spawnY, 40, 200, 100), maxPlayers: n(c.maxPlayers, 2, 12, 8)
+  };
+}
+function nspShim(nsp) {   // 通常の io と同じ使い方ができるようにする
+  return {
+    to: function (r) { return nsp.to(r); },
+    emit: function () { return nsp.emit.apply(nsp, arguments); },
+    on: function (ev, fn) { return nsp.on(ev, fn); },
+    sockets: { adapter: nsp.adapter, sockets: nsp.sockets }
+  };
+}
+function worldStop(id, msg) {
+  const w = worlds.get(id); if (!w) return;
+  try { w.inst.destroy(); } catch (e) {}
+  try { w.nsp.emit('fxWorldClosed', { msg: msg || 'サーバーが閉じられました' }); } catch (e) {}
+  const olds = []; try { w.nsp.sockets.forEach(function (s) { olds.push(s); }); } catch (e) {}
+  setTimeout(function () { olds.forEach(function (s) { try { s.disconnect(true); } catch (e) {} }); }, 400);
+  try { w.nsp.removeAllListeners('connection'); } catch (e) {}
+  worlds.delete(id);
+  console.log('[world] 停止:', w.cfg.name, '(' + id + ')');
+}
+function worldStart(cfg, msg) {
+  if (!/^[a-z0-9]{6,12}$/.test(cfg.id)) return false;
+  if (worlds.has(cfg.id)) worldStop(cfg.id, msg || '設定が変わったので、サーバーが再起動します。もう一度入ってください');
+  else if (worlds.size >= WORLD_MAX) { console.warn('[world] 個人サーバーが多すぎます（' + WORLD_MAX + '）'); return false; }
+  const nsp = io.of('/w/' + cfg.id);
+  try { nsp.removeAllListeners('connection'); } catch (e) {}
+  const inst = createWorld(nspShim(nsp), cfg);
+  worlds.set(cfg.id, { cfg: cfg, inst: inst, nsp: nsp });
+  console.log('[world] 起動:', cfg.name, '(' + cfg.id + ')');
+  return true;
+}
+async function worldsLoadAll(first) {   // GAS から全部読む（起動時／10分ごと。すでに動いているものは、そのまま）
+  const j = await fxGasPost({ action: 'fpsWorldListSrv', secret: TRADE_SECRET });
+  if (!j || j.status !== 'success' || !Array.isArray(j.worlds)) { console.warn('[world] 一覧を読めませんでした'); return; }
+  j.worlds.forEach(function (c) { const cfg = wNorm(c); if (cfg.id && !worlds.has(cfg.id)) worldStart(cfg); });
+}
+
+app.use(function (req, res, next) {   // このサイトからの呼び出しだけ許す
+  const o = req.headers.origin;
+  if (originOk(o)) { res.setHeader('Access-Control-Allow-Origin', o); res.setHeader('Vary', 'Origin'); res.setHeader('Access-Control-Allow-Headers', 'Content-Type'); res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS'); }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+app.use(express.json({ limit: '4kb' }));
+app.get('/worlds', function (req, res) {
+  const list = [{ id: 'main', name: 'メインワールド', main: 1, players: mainWorld.count(), max: 0 }];
+  const others = [];
+  worlds.forEach(function (w) { const c = w.cfg; others.push({ id: c.id, name: c.name, owner: c.ownerName, players: w.inst.count(), max: c.maxPlayers, lock: c.pass ? 1 : 0, half: c.half, spawn: c.spawnMode, spawnY: c.spawnY, pvp: c.pvp ? 1 : 0, blocks: c.blocks ? 1 : 0, drop: c.dropOnDeath ? 1 : 0, bots: c.botCount }); });
+  others.sort(function (a, b) { return b.players - a.players; });
+  res.json({ v: 22, worlds: list.concat(others) });
+});
+app.post('/world/boot', async function (req, res) {   // 作った／設定を変えた／削除した：持ち主から「GAS を読みなおして」と言われる
+  try {
+    if (!originOk(req.headers.origin)) return res.status(403).json({ ok: false, msg: 'forbidden' });
+    const b = req.body || {}, wid = String(b.worldId || ''), oid = String(b.id || '').trim().toLowerCase();
+    if (!/^[a-z0-9]{6,12}$/.test(wid) || oid.length < 8) return res.json({ ok: false, msg: 'bad' });
+    const t = Date.now();
+    if (t - (worldBootAt.get(wid) || 0) < WORLD_BOOT_GAP_MS) return res.json({ ok: false, msg: '少し待ってから、もう一度どうぞ' });
+    worldBootAt.set(wid, t);
+    const j = await fxGasPost({ action: 'fpsWorldGetSrv', secret: TRADE_SECRET, worldId: wid });
+    if (!j || j.status !== 'success') return res.json({ ok: false, msg: 'GAS につながりません' });
+    if (j.world) {
+      const cfg = wNorm(j.world);
+      if (cfg.ownerId.trim().toLowerCase() !== oid) return res.json({ ok: false, msg: '持ち主ではありません' });
+      return res.json({ ok: worldStart(cfg), msg: '' });
+    }
+    const w = worlds.get(wid);   // GAS に無い＝削除された
+    if (w && String(w.cfg.ownerId).trim().toLowerCase() !== oid) return res.json({ ok: false, msg: '持ち主ではありません' });
+    if (w) worldStop(wid, 'このサーバーは削除されました');
+    res.json({ ok: true, deleted: true });
+  } catch (e) { console.error('[world/boot]', e && e.message); res.json({ ok: false, msg: 'エラーが出ました' }); }
+});
+setTimeout(function () { worldsLoadAll(true).catch(function (e) { console.error('[world]', e && e.message); }); }, 2000);
+setInterval(function () { worldsLoadAll(false).catch(function () {}); }, 10 * 60 * 1000);
 
 // どこかで想定外のエラーが起きても、サーバー全体は止めない（Render のログに出るだけ）
 process.on('uncaughtException', (e) => { console.error('[想定外のエラー]', e && e.message); });
