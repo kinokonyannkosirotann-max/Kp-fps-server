@@ -76,6 +76,14 @@ async function fxIdentity(deviceId, fresh) {
 }
 async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceId, fresh); return !!(i && i.owner); }
 
+
+
+
+const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
+
+
+
+
 // ★ver.22：ここから下は「ワールド1つぶんの中身」。ワールドごとに別々に作られます（メイン＋個人サーバー）
 function createWorld(io, WCFG) {
 const IS_MAIN = !!WCFG.main;
@@ -547,7 +555,7 @@ function fxrFreeRider(sid) {   // この人が乗っているトロッコを、�
 // ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
 // 流れ：申請(invite) → 承認で画面が開く(open) → 両方が承認すると5秒のカウントダウン → 差し出す物を両方の手元から外す(locking)
 //       → KP があれば GAS で一度に入れ替える(paying) → 双方に受け取りを知らせる(done)。どこかで失敗したら、外した物は元に戻します
-const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ文字列を入れてください（KP を含むトレードに必要。空のままだと、KP のトレードだけ断ります）
+
 const TRD_INVITE_MS = 60000, TRD_COUNTDOWN_MS = 5000, TRD_LOCK_TIMEOUT_MS = 8000, TRD_MAX_ITEMS = 16, TRD_KP_MAX = 1000000000;
 const trades = new Map();    // 取引の番号 → 取引
 const tradeOf = new Map();   // socket.id → 取引の番号（1人につき同時に1つだけ）
