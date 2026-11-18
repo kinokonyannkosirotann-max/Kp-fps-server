@@ -921,38 +921,36 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     })().catch((e) => { console.error('[deviceid]', e && e.message); reply({ ok: false, msg: 'エラーが出ました' }); });
   });
 
+// ---- 👻 Owner専用：透明化の管理 ----
+on('fxInvis', async (d) => {
+  const p = players[socket.id];
+  if (!p || !d) return;
+
+  if (!(await fxOwnerRefresh(true))) {
+    socket.emit('fxInvis', {
+      ok: false,
+      msg: 'Owner だけが使えます'
+    });
+    return;
+  }
+
+  const q = players[socket.id];
+  if (!q) return;
+
+  q.invis = !!d.on;
+
+  socket.emit('fxInvis', {
+    ok: true,
+    on: q.invis
+  });
+
+  io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+
+  console.log('[透明化]', q.name, q.invis ? 'ON' : 'OFF');
+});
+  
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
   on('fxBanRequest', (d) => {
-      // ---- 👻 Owner専用：透明化の管理 ----
-  on('fxInvis', async (d) => {
-    const p = players[socket.id];
-    if (!p || !d) return;
-
-    // サーバー側でもOwner本人か確認
-    if (!(await fxOwnerRefresh(true))) {
-      socket.emit('fxInvis', {
-        ok: false,
-        msg: 'Owner だけが使えます'
-      });
-      return;
-    }
-
-    const q = players[socket.id];
-    if (!q) return;
-
-    q.invis = !!d.on;
-
-    // 本人に結果を返す
-    socket.emit('fxInvis', {
-      ok: true,
-      on: q.invis
-    });
-
-    // 全員に新しいプレイヤー一覧を配る
-    io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
-
-    console.log('[透明化]', q.name, q.invis ? 'ON' : 'OFF');
-  });
     if (!d || !players[socket.id]) return;
     const reply = (ok, msg) => socket.emit('fxBanResult', { ok: ok, msg: msg });
     const now = Date.now();
