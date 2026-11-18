@@ -1498,25 +1498,55 @@ setInterval(() => {   // ゲームに入っている人にだけ、全員の位�
   if (bs !== lastBotsJson || now - lastBotsAt >= BCAST_KEEPALIVE_MS) { lastBotsJson = bs; lastBotsAt = now; io.to(GAME_ROOM).emit('botsUpdate', bl); }
 }, 100);
 
-setInterval(() => {   // ★落とし物の時間切れ（一定時間たったら消える。決闘場の落とし物は5分）
+setInterval(() => {
+  // ★落とし物の時間切れ（決闘場の落とし物は5分）
   if (fxDrops.size === 0) return;
-  const now = Date.now(), gone = [], redo = [];
-  for (const [did, r] of fxDrops) {
-    const duel = r.y >= DUEL_MIN_Y;
-    if (now - r.born >= (duel ? DUEL_LOOT_MS : FX_DROP_LIFETIME_MS)) { gone.push(did); }
-    else if (duel && now - (r.rb || r.born) >= 100 * 1000) redo.push(did);   // クライアントは150秒で見えなくするので、その前に出しなおす
-  }
-  const adds = [];
-  for (const did of gone) fxDrops.delete(did);
-  for (const did of redo) {
-    const r = fxDrops.get(did); if (!r) continue;
-    fxDrops.delete(did); gone.push(did);
-    r.did = ++fxDropSeq; r.rb = now; fxDrops.set(r.did, r); adds.push(fxDropPublic(r));
-  }
-  if (gone.length) io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
-  if (adds.length) io.to(GAME_ROOM).emit('fxDropAdd', { list: adds });
-}, 5000);
 
+  const now = Date.now();
+  const gone = [];
+  const redo = [];
+
+  for (const [did, r] of fxDrops) {
+    // 高さではなく、決闘場の範囲内かどうかで判定
+    const duel =
+      Math.abs(r.x - DUEL_CX) <= DUEL_HALF &&
+      Math.abs(r.z - DUEL_CZ) <= DUEL_HALF;
+
+    if (now - r.born >= (duel ? DUEL_LOOT_MS : FX_DROP_LIFETIME_MS)) {
+      gone.push(did);
+    } else if (duel && now - (r.rb || r.born) >= 100 * 1000) {
+      redo.push(did);
+    }
+  }
+
+  const adds = [];
+
+  for (const did of gone) {
+    fxDrops.delete(did);
+  }
+
+  for (const did of redo) {
+    const r = fxDrops.get(did);
+    if (!r) continue;
+
+    fxDrops.delete(did);
+    gone.push(did);
+
+    r.did = ++fxDropSeq;
+    r.rb = now;
+    fxDrops.set(r.did, r);
+    adds.push(fxDropPublic(r));
+  }
+
+  if (gone.length) {
+    io.to(GAME_ROOM).emit('fxDropGone', { ids: gone });
+  }
+
+  if (adds.length) {
+    io.to(GAME_ROOM).emit('fxDropAdd', { list: adds });
+  }
+}, 5000);
+  
 setInterval(() => {   // Botの上下の動き（吹き飛ばされたら、重力で落ちてくる）
   const dt = 0.05;
   for (const bot of bots) {
@@ -1623,7 +1653,9 @@ setInterval(() => {   // BotのAI（0.2秒ごと）
 // ===== ⚔️ 決闘（/duel） =====
 const DUEL_INVITE_MS = 60 * 1000;      // 申し込みの有効時間
 const DUEL_LOOT_MS = 5 * 60 * 1000;    // 勝ったあと、落とし物を拾える時間
-const DUEL_MIN_Y = 250;                // 決闘場の高さ（クライアントの F47_Y=300 より少し下。この高さより上の落とし物は、5分間残す）
+const DUEL_CX = 60;
+const DUEL_CZ = -60;
+const DUEL_HALF = 21;             // 決闘場の高さ（クライアントの F47_Y=300 より少し下。この高さより上の落とし物は、5分間残す）
 const duels = new Map();               // 番号 → 決闘
 const duelOf = new Map();              // 人(socket.id) → 決闘
 let duelSeq = 0;
