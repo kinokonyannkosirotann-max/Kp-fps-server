@@ -653,6 +653,45 @@ io.on('connection', (socket) => {
   }
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
+
+
+// ==========================================
+// ★fx50：Owner専用 透明化
+// ==========================================
+on('fxInvisSet', (d) => {
+  const p = players[socket.id];
+  if (!p || !d || typeof d.enabled !== 'boolean') return;
+
+  (async () => {
+    // サーバー側で毎回Owner確認
+    if (!(await fxOwnerRefresh(true))) {
+      socket.emit('fxInvisResult', {
+        ok: false,
+        enabled: false,
+        msg: 'Owner だけが使えます'
+      });
+      return;
+    }
+
+    const me = players[socket.id];
+    if (!me) return;
+
+    me.invis = d.enabled;
+
+    socket.emit('fxInvisResult', {
+      ok: true,
+      enabled: !!me.invis
+    });
+
+    // 全員にすぐ反映
+    io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+  })().catch((e) => {
+    console.error('[fx50 invis]', e && e.message);
+  });
+});
+  
+  
+
   let joining = false, joinTries = 0;
   on('join', (d) => {
     if (players[socket.id] || joining) return;
@@ -933,6 +972,16 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     if (!tsid) { reply(false, 'その人は、もうオンラインにいません'); return; }
     if (tsid === socket.id) { reply(false, '自分はBANできません'); return; }
     const t = players[tsid];
+
+// ★fx50：BAN演出開始時にOwnerの透明化を解除
+me.invis = false;
+socket.emit('fxInvisResult', {
+  ok: true,
+  enabled: false
+});
+io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+    
+    
     const reason = String(d.reason || '').replace(/[\[\]()'"\r\n]/g, '').trim().slice(0, 60);
     const minutes = Math.max(0, Math.min(2628000, Math.floor(Number(d.minutes) || 0)));
     const tName = t.name, tId = t.id, pos = { x: t.x, y: t.y, z: t.z };
