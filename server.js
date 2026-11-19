@@ -797,7 +797,7 @@ io.on('connection', (socket) => {
     if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
     if (duelActive(socket.id) !== duelActive(tsid)) return;   // 決闘場の中と外では、ダメージを出せない
     if (!fxHitReachOk(attacker, target, String(d.weaponId || ''))) { fxViolation(socket, attacker, '届かない距離へのヒット'); return; }
-//   if (fxMultiHit(attacker, tsid, Date.now(), String(d.weaponId || '')) > FX_MULTI_MAX) { fxViolation(socket, attacker, '一瞬で何人にも当てている（killaura？）'); return; }
+    if (fxMultiHit(attacker, tsid, Date.now(), String(d.weaponId || '')) > FX_MULTI_MAX) { fxViolation(socket, attacker, '一瞬で何人にも当てている（killaura？）'); return; }
     if (!(attacker.health > 0) || fxInSafeTower(attacker)) return;   // やられている人・出現の塔の上の人は、ダメージを出せない
     const now = Date.now();
     const viaT = !!d.viaTurret && fxHasArmedTurret(socket.id);   // ★本当に「銃つきの台座」を持っている人の、台座の弾だけ
