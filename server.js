@@ -28,17 +28,40 @@ const ALLOWED_ORIGIN_RE = /^https:\/\/([a-z0-9-]+\.)?point0\.pages\.dev$/;   // 
 const ALLOW_LOCAL = false;                                                   // true にすると、自分のパソコン（localhost）でのテストもできる
 const LOCAL_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 function originOk(o) { if (typeof o !== 'string' || !o) return false; if (ALLOWED_ORIGIN_RE.test(o)) return true; return ALLOW_LOCAL && LOCAL_RE.test(o); }
-let lastOriginWarnAt = 0;
+const crypto = require('crypto');
+const IP_XFF_FROM_RIGHT = 1;   // ★ x-forwarded-for の「右から何番目」を本人のIPとみなすか（まず Render のログで確認：下の [ip確認] の行を見る）
+const ipBans = new Map();      // IPの目印（ハッシュ）→ { until: 解除の時刻(ms)。0＝ずっと, at: 登録時刻 }
+function ipOf(req) {
+  const h = (req && req.headers) || {};
+  const first = (v) => String(v || '').split(',')[0].trim();
+  const xff = String(h['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return first(h['cf-connecting-ip']) || first(h['true-client-ip']) || xff.slice(-IP_XFF_FROM_RIGHT)[0] || (req && req.socket && req.socket.remoteAddress) || '';
+}
+function ipKey(ip) {   // 生のIPは保存しない。塩つきのハッシュにする（IPv6は先頭64ビットでひとまとめ）
+  ip = String(ip || '').replace(/^::ffff:/, '');
+  if (ip.indexOf(':') >= 0) ip = ip.split(':').slice(0, 4).join(':');
+  return crypto.createHash('sha256').update((process.env.IPBAN_SALT || TRADE_SECRET || 'kp') + '|' + ip).digest('hex').slice(0, 32);
+}
+function ipBanned(key) {
+  const b = ipBans.get(key);
+  if (!b) return false;
+  if (b.until && b.until < Date.now()) { ipBans.delete(key); return false; }
+  return true;
+}
+let lastOriginWarnAt = 0, ipLogN = 0;
 const io = new Server(server, {
   cors: { origin: (o, cb) => cb(null, originOk(o)) },
   allowRequest: (req, cb) => {
     const o = req.headers.origin;
     const ok = originOk(o);
     if (!ok) { const t = Date.now(); if (t - lastOriginWarnAt > 5000) { lastOriginWarnAt = t; console.warn('[接続を断りました] 許可されていないサイト: ' + (o || '（Originなし）')); } }
+    if (ok && ipLogN < 5) { ipLogN++; console.log('[ip確認] cf=' + (req.headers['cf-connecting-ip'] || '-') + ' true=' + (req.headers['true-client-ip'] || '-') + ' xff=' + (req.headers['x-forwarded-for'] || '-')); }
+    if (ok && ipBanned(ipKey(ipOf(req)))) { cb(null, false); return; }   // ★IP BAN されたネットワークからは、つながらない
     cb(null, ok);
   },
-  perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }   // ★256バイト以上の知らせは圧縮して送る（通信量が 1/4〜1/8 ほどに）
+  perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
+
 app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.22・ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
@@ -94,7 +117,7 @@ const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
 const BCAST_KEEPALIVE_MS = 3500;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
-const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1 };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1, ipk: 1, hits: 1, };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
 function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
@@ -205,6 +228,26 @@ function fxViolation(socket, p, why) {   // おかしな知らせを数えて、
     setTimeout(() => { try { socket.disconnect(true); } catch (e) {} }, 200);
   }
 }
+  const FX_RESTRICTED_RE = /^(item_)?(banrod|godrifle|kami_[a-z0-9_]*|nuke[0-9]*|stab|railgun)$/;   // Owner 以外は、持ち出し・トレード・出品ができない物
+const FX_MELEE_RE = /(knife|sword|mace|axe|hammer|spear|scythe|dagger|chain|stick|staff)/i;       // 近接武器
+const FX_MELEE_REACH = 18;       // 近接武器が当てられる最大の距離(m)。ふつうは4mほど。通信の遅れの分を、多めに見ている
+const FX_RANGED_REACH = 800;     // 遠距離武器の最大の距離(m)
+const FX_MULTI_WINDOW_MS = 400;  // この時間(ms)の間に…
+const FX_MULTI_MAX = 4;          // …この人数より多くに当てたら、killaura とみなす（爆発・オービタルは数えない）
+const FX_AREA_RE = /(nuke|stab|railgun|rocket|grenade|tnt|molotov|m79|flare|flash|lava|wither|thunder|blaze|mine|turret|bomb)/i;
+function fxHitReachOk(attacker, t, wid) {   // サーバーが知っている位置どうしで、本当に届く距離か
+  const dx = attacker.x - t.x, dy = attacker.y - t.y, dz = attacker.z - t.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz) <= (FX_MELEE_RE.test(wid) ? FX_MELEE_REACH : FX_RANGED_REACH);
+}
+function fxMultiHit(attacker, tsid, now, wid) {   // いま何人に当てているか（爆発系は1人として数える）
+  if (FX_AREA_RE.test(wid)) return 1;
+  const w = attacker.hits || (attacker.hits = []);
+  w.push({ t: now, s: tsid });
+  while (w.length && now - w[0].t > FX_MULTI_WINDOW_MS) w.shift();
+  const set = {}; w.forEach((x) => { set[x.s] = 1; });
+  return Object.keys(set).length;
+}
+
 
 function randomSpot() {
   return { x: (Math.random() - 0.5) * FIELD_HALF * 1.7, z: (Math.random() - 0.5) * FIELD_HALF * 1.7 };
@@ -511,7 +554,7 @@ const FX_DROP_MAX = 400;                  // 地面に落ちていられる合�
 const FX_DROP_PER_EVENT = 60;             // 1回の知らせで落とせる数
 const FX_DROP_PICK_REACH = 8;             // 拾う時：サーバーが知っている位置から、この距離(m)まで（通信の遅れの余裕を含む）
 const FX_DROP_ID_RE = /^[a-z0-9_]{1,32}$/;
-const FX_DROP_DENY_RE = /^(banrod|godrifle|kami_.*)$/;   // 落とし物にできない物
+const FX_DROP_DENY_RE = /^(item_)?(banrod|godrifle|kami_.*)$/;
 const fxDrops = new Map();                // 番号 → 落とし物
 let fxDropSeq = 0;
 function fxDropPublic(r) { return { did: r.did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at, x: r.x, y: r.y, z: r.z, s: r.s, src: r.src, rare: r.rare }; }
@@ -691,6 +734,7 @@ io.on('connection', (socket) => {
       const dups = Object.keys(players).filter((s) => players[s].id === rawId && s !== socket.id);   // ★同じアカウントで前から入っている接続（あとで切る）
       players[socket.id] = {
         id: rawId,
+        ipk: ipKey(ipOf(socket.request)),
         name: name,
         x: ONLINE_TOWER.x, y: SPAWN_Y, z: ONLINE_TOWER.z, yaw: 0, pitch: 0,
         weaponId: 'pistol', health: 100, armor: '0,0,0,0', costume: '', crouching: false,
@@ -752,6 +796,8 @@ io.on('connection', (socket) => {
     const target = players[tsid];
     if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
     if (duelActive(socket.id) !== duelActive(tsid)) return;   // 決闘場の中と外では、ダメージを出せない
+    if (!fxHitReachOk(attacker, target, String(d.weaponId || ''))) { fxViolation(socket, attacker, '届かない距離へのヒット'); return; }
+//   if (fxMultiHit(attacker, tsid, Date.now(), String(d.weaponId || '')) > FX_MULTI_MAX) { fxViolation(socket, attacker, '一瞬で何人にも当てている（killaura？）'); return; }
     if (!(attacker.health > 0) || fxInSafeTower(attacker)) return;   // やられている人・出現の塔の上の人は、ダメージを出せない
     const now = Date.now();
     const viaT = !!d.viaTurret && fxHasArmedTurret(socket.id);   // ★本当に「銃つきの台座」を持っている人の、台座の弾だけ
@@ -839,6 +885,7 @@ io.on('connection', (socket) => {
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
+    if (!fxHitReachOk(me, bot, String(d.weaponId || ''))) { fxViolation(socket, me, '届かない距離のBotへのヒット'); return; }
 const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     bot.health -= dmgIn;
     if (bot.boss) { bot.dmgBy[socket.id] = (bot.dmgBy[socket.id] || 0) + Math.min(dmgIn, hpBefore); bot.lastHitSid = socket.id; }
@@ -950,65 +997,187 @@ on('fxInvis', async (d) => {
 });
   
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
-  on('fxBanRequest', (d) => {
+on('fxBanRequest', (d) => {
     if (!d || !players[socket.id]) return;
     const reply = (ok, msg) => socket.emit('fxBanResult', { ok: ok, msg: msg });
     const now = Date.now();
-    if (fxBanBusyUntil > now) { reply(false, '別のBANの演出中です。少し待ってください'); return; }
+
+    if (fxBanBusyUntil > now) {
+      reply(false, '別のBANの演出中です。少し待ってください');
+      return;
+    }
+
     const me = players[socket.id];
-    if (!me.owner) { reply(false, 'Owner だけが使えます'); return; }   // 入口は記憶で即答（ほんとうの確認は、裏でGASがする）
-    let tsid = (d.targetId && players[String(d.targetId)]) ? String(d.targetId) : null;
-    if (!tsid) { const q = String(d.targetName || '').trim().toLowerCase(); tsid = Object.keys(players).find(s => players[s].name.toLowerCase() === q) || null; }
-    if (!tsid) { reply(false, 'その人は、もうオンラインにいません'); return; }
-    if (tsid === socket.id) { reply(false, '自分はBANできません'); return; }
+
+    if (!me.owner) {
+      reply(false, 'Owner だけが使えます');
+      return;
+    }
+
+    let tsid = (d.targetId && players[String(d.targetId)])
+      ? String(d.targetId)
+      : null;
+
+    if (!tsid) {
+      const q = String(d.targetName || '').trim().toLowerCase();
+      tsid = Object.keys(players).find(
+        s => players[s].name.toLowerCase() === q
+      ) || null;
+    }
+
+    if (!tsid) {
+      reply(false, 'その人は、もうオンラインにいません');
+      return;
+    }
+
+    if (tsid === socket.id) {
+      reply(false, '自分はBANできません');
+      return;
+    }
+
     const t = players[tsid];
-    // ★BAN演出開始時点で透明化を解除
-if (t.invis) {
-  t.invis = false;
 
-  io.to(tsid).emit('fxInvis', {
-    ok: true,
-    on: false,
-    auto: true
-  });
+    // ★BAN演出開始時点で透明化を解除（元の機能を維持）
+    if (t.invis) {
+      t.invis = false;
 
-  io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+      io.to(tsid).emit('fxInvis', {
+        ok: true,
+        on: false,
+        auto: true
+      });
 
-  console.log('[透明化解除] BAN杖:', t.name);
-}
-    const reason = String(d.reason || '').replace(/[\[\]()'"\r\n]/g, '').trim().slice(0, 60);
-    const minutes = Math.max(0, Math.min(2628000, Math.floor(Number(d.minutes) || 0)));
-    const tName = t.name, tId = t.id, pos = { x: t.x, y: t.y, z: t.z };
+      io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+
+      console.log('[透明化解除] BAN杖:', t.name);
+    }
+
+    // ★アカウントBAN / IP BAN の選択
+    const mode = d.mode === 'ip' ? 'ip' : 'account';
+
+    if (mode === 'ip' && (!t.ipk || (me.ipk && me.ipk === t.ipk))) {
+      reply(
+        false,
+        me.ipk && me.ipk === t.ipk
+          ? 'あなたと同じネットワークの人なので、IP BAN はできません'
+          : 'IPが分からないので、IP BAN はできません'
+      );
+      return;
+    }
+
+    const reason = String(d.reason || '')
+      .replace(/[\[\]()'"\r\n]/g, '')
+      .trim()
+      .slice(0, 60);
+
+    const minutes = Math.max(
+      0,
+      Math.min(2628000, Math.floor(Number(d.minutes) || 0))
+    );
+
+    const tName = t.name;
+    const tId = t.id;
+    const tIpk = t.ipk;
+    const pos = { x: t.x, y: t.y, z: t.z };
+
     fxBanBusyUntil = now + FX_BAN_SHOW_MS + 14000;
     t.banLock = now + FX_BAN_SHOW_MS + 20000;
 
     // ★本人確認とBANの書きこみは、演出と同時に、裏で進める
     const task = (async () => {
-      if (!(await fxOwnerRefresh(true))) return { ok: false, msg: 'Owner だけが使えます' };
-      const j = await fxGasPost({ action: 'fpsOwnerBan', id: me.id, targetId: tId, reason: reason, minutes: minutes });
-      if (!j || j.status !== 'success') return { ok: false, msg: (j && j.msg) || 'GAS につながりません（GAS_URL を確かめてください）' };
-      return { ok: true };
-    })().catch((e) => { console.error('[ban]', e && e.message); return { ok: false, msg: 'エラーが出ました' }; });
+      if (!(await fxOwnerRefresh(true))) {
+        return { ok: false, msg: 'Owner だけが使えます' };
+      }
 
-    io.to(GAME_ROOM).emit('fxBanStart', { ownerSid: socket.id, ownerName: me.name, targetSid: tsid, targetName: tName, x: pos.x, y: pos.y, z: pos.z, ms: FX_BAN_SHOW_MS, perm: minutes === 0 });
-    reply(true, '執行します：' + tName);
+      const j = await fxGasPost({
+        action: 'fpsOwnerBan',
+        id: me.id,
+        targetId: tId,
+        reason: reason,
+        minutes: minutes
+      });
+
+      if (!j || j.status !== 'success') {
+        return {
+          ok: false,
+          msg: (j && j.msg) || 'GAS につながりません（GAS_URL を確かめてください）'
+        };
+      }
+
+      return { ok: true };
+    })().catch((e) => {
+      console.error('[ban]', e && e.message);
+      return { ok: false, msg: 'エラーが出ました' };
+    });
+
+    io.to(GAME_ROOM).emit('fxBanStart', {
+      ownerSid: socket.id,
+      ownerName: me.name,
+      targetSid: tsid,
+      targetName: tName,
+      x: pos.x,
+      y: pos.y,
+      z: pos.z,
+      ms: FX_BAN_SHOW_MS,
+      perm: minutes === 0
+    });
+
+    reply(
+      true,
+      '執行します：' + tName + (mode === 'ip' ? '（IP BAN）' : '')
+    );
 
     setTimeout(async () => {
-      const r = await task;   // 演出が終わっても、GASの返事が遅ければ、ここで待つ
-      if (!r.ok) {   // 失敗：演出を取り消して、相手を解放する
-        const tt = players[tsid]; if (tt) tt.banLock = 0;
+      const r = await task;
+
+      if (!r.ok) {
+        const tt = players[tsid];
+        if (tt) tt.banLock = 0;
+
         fxBanBusyUntil = 0;
         io.to(GAME_ROOM).emit('fxBanAbort', {});
         reply(false, r.msg);
         return;
       }
+
       fxOwnerCache.delete(String(tId).trim());
-      io.to(GAME_ROOM).emit('fxBanSlam', { ownerSid: socket.id, targetSid: tsid, x: pos.x, y: pos.y, z: pos.z });
-      reply(true, 'BANしました：' + tName + (minutes ? '（' + minutes + '分）' : '（無期限）'));
-      setTimeout(() => { io.to(tsid).emit('fxBanKill', {}); }, 600);
-      setTimeout(() => { const s = io.sockets.sockets.get(tsid); if (s) s.disconnect(true); }, 3600);
+
+      // ★IP BANの場合は、そのIPをBANリストに追加
+      if (mode === 'ip') {
+        ipBanAdd(tIpk, minutes, reason, me, tName);
+      }
+
+      io.to(GAME_ROOM).emit('fxBanSlam', {
+        ownerSid: socket.id,
+        targetSid: tsid,
+        x: pos.x,
+        y: pos.y,
+        z: pos.z
+      });
+
+      reply(
+        true,
+        'BANしました：' + tName +
+        (mode === 'ip' ? '（IP BAN・' : '（') +
+        (minutes ? minutes + '分）' : '無期限）')
+      );
+
+      setTimeout(() => {
+        io.to(tsid).emit('fxBanKill', {});
+      }, 600);
+
+      setTimeout(() => {
+        const s = io.sockets.sockets.get(tsid);
+        if (s) s.disconnect(true);
+
+        // ★IP BANの場合、同じIPの接続も切断
+        if (mode === 'ip') {
+          ipKickAll(tIpk);
+        }
+      }, 3600);
+
     }, FX_BAN_SHOW_MS);
-  });
+});
   
   // ---- ★BAN杖：Owner が Bot をBAN（演出はクライアントだけ。ここでは、Bot を死んだ扱いにするだけ） ----
   on('fxBanBot', (d) => {
@@ -1051,6 +1220,8 @@ if (t.invis) {
   on('trdOffer', (d) => {
     const me = players[socket.id]; const tr = trdGet(d, ['open']); if (!tr || !me || !fxRate(me, 'trdOff', 8, 14)) return;
     const next = trdCleanOffer(d.items, d.kp);
+    if (!me.owner) next.items = next.items.filter((x) => !FX_RESTRICTED_RE.test(x.id));
+
     if (JSON.stringify(next) === JSON.stringify(tr.offer[socket.id])) return;   // ★内容が同じなら何もしない（「承認」を押す直前にも最新の内容が送られてくるので、ここで相手の承認を消さないように）
     tr.offer[socket.id] = next;
     tr.ok[tr.a] = false; tr.ok[tr.b] = false; trdClear(tr);   // 内容が変わったら、承認もカウントダウンもやり直し
@@ -1792,6 +1963,27 @@ app.post('/world/boot', async function (req, res) {   // 作った／設定を�
 });
 setTimeout(function () { worldsLoadAll(true).catch(function (e) { console.error('[world]', e && e.message); }); }, 2000);
 setInterval(function () { worldsLoadAll(false).catch(function () {}); }, 10 * 60 * 1000);
+
+function ipKickAll(key) {   // そのIPのつなぎ（メイン＋個人サーバー）を、すべて切る
+  const kick = (m) => { try { m.forEach((s) => { if (s.request && ipKey(ipOf(s.request)) === key) { try { s.emit('youWereKicked', {}); } catch (e) {} setTimeout(() => { try { s.disconnect(true); } catch (e) {} }, 100); } }); } catch (e) {} };
+  kick(io.sockets.sockets);
+  worlds.forEach((w) => kick(w.nsp.sockets));
+}
+function ipBanAdd(key, minutes, reason, me, name) {
+  if (!key) return;
+  const until = minutes > 0 ? Date.now() + minutes * 60000 : 0;
+  ipBans.set(key, { until: until, at: Date.now() });
+  fxGasPost({ action: 'fpsIpBanAdd', secret: TRADE_SECRET, id: me.id, key: key, until: until, reason: reason, name: name }).catch(() => {});
+}
+async function ipBansLoad() {   // GAS に記録されている IP BAN を読み込む（起動時と5分ごと。シートから行を消せば、解除される）
+  const j = await fxGasPost({ action: 'fpsIpBanList', secret: TRADE_SECRET });
+  if (!j || j.status !== 'success' || !Array.isArray(j.list)) return;
+  const seen = {};
+  j.list.forEach((r) => { if (r && /^[0-9a-f]{32}$/.test(String(r.key))) { seen[r.key] = 1; if (!ipBans.has(r.key)) ipBans.set(r.key, { until: Number(r.until) || 0, at: 0 }); } });
+  ipBans.forEach((v, k) => { if (!seen[k] && Date.now() - v.at > 2 * 60 * 1000) ipBans.delete(k); });
+}
+setTimeout(() => { ipBansLoad().catch(() => {}); }, 3000);
+setInterval(() => { ipBansLoad().catch(() => {}); }, 5 * 60 * 1000);
 
 // どこかで想定外のエラーが起きても、サーバー全体は止めない（Render のログに出るだけ）
 process.on('uncaughtException', (e) => { console.error('[想定外のエラー]', e && e.message); });
