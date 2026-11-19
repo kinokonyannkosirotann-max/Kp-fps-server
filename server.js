@@ -1530,6 +1530,15 @@ on('fxBanRequest', (d) => {
     socket.broadcast.emit('chatBroadcast', { name: p ? p.name : '???', text: text });
   });
 
+  // ---- 🔎 デバッグ操作の記録（誰が使ったか）----
+  on('fxTrap', (d) => {
+    const me = players[socket.id];
+    if (!me || !d || !fxRate(me, 'trap', 0.2, 5)) return;
+    const cmd = String(d.cmd || '').slice(0, 40), kind = String(d.kind || '').slice(0, 12);
+    console.warn('[罠] ' + me.name + ' が「' + cmd + '」を実行（' + kind + ' ／ ' + (IS_MAIN ? 'メイン' : WCFG.id) + '）');
+    fxGasPost({ action: 'fpsTrapLog', secret: TRADE_SECRET, id: me.id, name: me.name, cmd: cmd, kind: kind, world: IS_MAIN ? 'main' : WCFG.id }).catch(() => {});
+  });
+  
   // ---- /tell（特定の人にだけ送るメッセージ） ----
   on('whisper', (d) => {
     const me = players[socket.id];
