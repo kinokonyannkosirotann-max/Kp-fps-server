@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.22：ver.21 ＋ ボスBot・/tell・/duel（決闘）・決闘場の落とし物5分）
+//  KP銃ゲー オンライン対戦サーバー（ver.23：ver.22 ＋ ヘリコプター（4人乗り））
+//   ★ver.23 の追加：ヘリコプター（hlState／hlBoard／hlLeave／hlDmg／hlGone：席の割り当て・位置の中継・同乗者のダメージを機体へ）
 //   ★ver.22 の追加：ボスBot（bossSpawn／bossDead）／ /tell（whisper）／ /duel（duelAsk・duelReply・duelBack）／ 決闘場（高さ250以上）の落とし物は5分残す
 //   ★ver.21 の追加：killFeed に weaponId（倒した武器）を付ける／updateState の hs（ホームシールド中）を全員に配る
 //   ★ver.20 の追加：エリトラの傾き（roll）を updateState で受け取り、全員に配る（1行だけ）
@@ -60,12 +61,12 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.22・ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.23・ヘリ／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
 
 // ---------- ★ver.16：Owner だけが使える /kick と BAN杖（ほんとうの確認は、サーバー＋GAS がします） ----------
-const GAS_URL = 'https://script.google.com/macros/s/AKfycbxPvvfzAU6myken0IddzXWUk5wcs4KE7LTzskG7TrkpMT80iSfsIskOVYDMEj6J9aI/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbzBYU-bilVbFbKUvlq-lI8A5sDBBUjKyOAZwhowxHVQ06p5q6QgkFwr48ObEWNubg/exec';   // ★★ここに、GAS 空のままだと、/kick も BAN杖も、だれも使えません（安全側）
 const FX_BAN_SHOW_MS = 3500;          // BANの演出：相手の上にテレポートしてから、落ちてくるまで待つ時間(ms)
 const fxOwnerCache = new Map();   // 'ID' → { owner, at }（同じ人を何度もGASに聞かないための記憶。30秒）
 const fxPlaneSids = new Set();         // 飛行機を出している人（ほかの人に、飛行機の形を見せるため）
@@ -672,6 +673,27 @@ function trdLeft(sid) {   // 誰かが抜けた
 
 const FX_PRE_JOIN_OK = { join: 1, disconnect: 1, fxOwnerAsk: 1, chatJoin: 1, dmMessage: 1, groupMessage: 1, fxChestSync: 1, fxNChestSync: 1, fxPlacedSync: 1, fxBlockSync: 1, fxrSync: 1, };   // 本人確認の前でも使えるもの（チャット専用の接続・読むだけの同期）
 
+// ---------- 🚁 ★ver.23：ヘリコプター（4人乗り）。席：0＝操縦席（置いた人）／1＝助手席／2・3＝後部座席 ----------
+const fxHeli = new Map();     // 持ち主の socket.id → { pay: 最後の状態, seats: [操縦席の人, 助手席の人, 後部左, 後部右]（空き＝''） }
+const fxHeliOf = new Map();   // 同乗している人の socket.id → 持ち主の socket.id
+function hlSeatsOut(osid, h) { io.to(GAME_ROOM).emit('hlSeats', { owner: osid, seats: h.seats.slice() }); }   // 席の状態を、全員に知らせる
+function hlPayload(osid, h) { return h.pay ? Object.assign({}, h.pay, { sid: osid, seats: h.seats.slice() }) : null; }
+function hlKickAll(osid, h, boom) {   // 同乗者を全員降ろす（操縦する人が降りた時）
+  for (let i = 1; i < 4; i++) { const r = h.seats[i]; if (r) { fxHeliOf.delete(r); io.to(r).emit('hlKick', { owner: osid, boom: boom ? 1 : 0 }); h.seats[i] = ''; } }
+}
+function hlRiderLeft(sid) {   // 同乗者が降りた・抜けた
+  const osid = fxHeliOf.get(sid); if (!osid) return;
+  fxHeliOf.delete(sid); const h = fxHeli.get(osid); if (!h) return;
+  const i = h.seats.indexOf(sid); if (i > 0) h.seats[i] = '';
+  hlSeatsOut(osid, h);
+}
+function hlOwnerGone(osid, boom) {   // ヘリが壊れた・片づけた・持ち主が抜けた
+  const h = fxHeli.get(osid); if (!h) return;
+  fxHeli.delete(osid); for (let i = 1; i < 4; i++) { if (h.seats[i]) fxHeliOf.delete(h.seats[i]); }
+  io.to(GAME_ROOM).emit('hlGone', { sid: osid, boom: boom ? 1 : 0 });   // 同乗者はこれを受け取って、脱出します
+}
+function hlLeft(sid) { hlRiderLeft(sid); hlOwnerGone(sid, 0); }   // 退出した（disconnect から呼ぶ）
+
 io.on('connection', (socket) => {
   const on = function (ev, fn) {
     socket.on(ev, guard(ev, function () {
@@ -679,44 +701,6 @@ io.on('connection', (socket) => {
       return fn.apply(this, arguments);
     }));
   };
-  
-
-    // ==========================================
-  // 🕵️ チート検知コマンドの記録
-  // ==========================================
-  let fxTrapLastAt = 0;
-
-  on('fxTrap', (d) => {
-    const p = players[socket.id];
-    if (!p || !d) return;
-
-    // 連続送信を制限
-    const now = Date.now();
-    if (now - fxTrapLastAt < 1500) return;
-    fxTrapLastAt = now;
-
-    const kind = String(d.kind || '').slice(0, 16);
-    const cmd = String(d.cmd || '').slice(0, 40);
-
-    if (!kind || !cmd) return;
-
-    // IDと名前はクライアントから受け取らず、サーバー内の情報を使う
-    fxGasPost({
-      action: 'fpsTrapLog',
-      secret: TRADE_SECRET,
-      id: p.id,
-      name: p.name,
-      kind: kind,
-      cmd: cmd
-    }).then((r) => {
-      if (!r || r.status !== 'success') {
-        console.error('[fxTrap] GASへの記録失敗:', r);
-      }
-    }).catch((e) => {
-      console.error('[fxTrap] エラー:', e && e.message);
-    });
-  });
-
 
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
@@ -786,6 +770,7 @@ io.on('connection', (socket) => {
       socket.emit('botsUpdate', publicBots());
       if (fxDrops.size) socket.emit('fxDropList', { list: Array.from(fxDrops.values()).map(fxDropPublic) });
       fxPlaneLast.forEach((pay, psid) => { if (psid !== socket.id && players[psid]) socket.emit('plRemote', pay); });   // ★いま出ている飛行機（止まっているものも）を、入ってきた人に教える
+      fxHeli.forEach((h, osid) => { if (osid !== socket.id && players[osid]) { const pl = hlPayload(osid, h); if (pl) socket.emit('hlRemote', pl); } });   // ★いま出ているヘリ（席のようすつき）を、入ってきた人に教える
     })().catch((e) => { console.error('[join]', e && e.message); deny('busy', '本人確認でエラーが出ました'); });
   });
 
@@ -983,6 +968,55 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     fxPlaneLast.delete(socket.id);
     if (!fxPlaneSids.delete(socket.id)) return;
     socket.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: d && d.boom ? 1 : 0 });
+  });
+
+  // ---- 🚁 ★ver.23：ヘリコプターの同期。位置は中継、席の割り当てはサーバーが決める ----
+  let hlLastAt = 0;
+  on('hlState', (d) => {
+    if (!d || typeof d !== 'object' || !players[socket.id]) return;
+    const now = Date.now(); if (now - hlLastAt < 50) return; hlLastAt = now;
+    let h = fxHeli.get(socket.id);
+    if (!h) { if (fxHeliOf.has(socket.id)) return; h = { pay: null, seats: ['', '', '', ''] }; fxHeli.set(socket.id, h); }
+    h.pay = { x: fxNum(d.x, 1000), y: fxNum(d.y, 1000), z: fxNum(d.z, 1000), yaw: fxNum(d.yaw, 7), pitch: fxNum(d.pitch, 7), roll: fxNum(d.roll, 7),
+      rot: Math.max(0, Math.min(1, Number(d.rot) || 0)), lt: d.lt ? 1 : 0, ms: Math.max(0, Math.min(10, Math.floor(Number(d.ms) || 0))), hp: Math.max(0, Math.min(100, Math.round(Number(d.hp) || 0))), gr: d.gr ? 1 : 0 };
+    socket.to(GAME_ROOM).emit('hlRemote', hlPayload(socket.id, h));
+  });
+  on('hlBoard', (d) => {   // 乗りたい：自分のヘリなら操縦席、ほかの人のヘリなら、空いている席（助手席→後部左→後部右）
+    const me = players[socket.id]; if (!me || !d || typeof d !== 'object') return;
+    if (!fxRate(me, 'hlBoard', 2, 4)) return;
+    const osid = String(d.owner || '');
+    if (osid === socket.id) {
+      if (fxHeliOf.has(socket.id)) return;
+      let h = fxHeli.get(socket.id); if (!h) { h = { pay: null, seats: ['', '', '', ''] }; fxHeli.set(socket.id, h); }
+      h.seats[0] = socket.id; hlSeatsOut(socket.id, h); return;
+    }
+    const no = (why) => socket.emit('hlSeat', { seat: -1, why: why });
+    const h = fxHeli.get(osid);
+    if (!h || !h.pay || !players[osid] || h.seats[0] !== osid) { no('操縦する人がいません'); return; }
+    if (fxHeliOf.has(socket.id)) return;
+    const mine = fxHeli.get(socket.id); if (mine && mine.seats[0] === socket.id) return;
+    try { if (duelActive(socket.id) || duelActive(osid)) { no('決闘中は乗れません'); return; } } catch (e) {}
+    if (!h.pay.gr) { no('飛んでいる間は乗れません'); return; }
+    if (Math.hypot(me.x - h.pay.x, me.z - h.pay.z) > 22) { no('ヘリから遠すぎます'); return; }
+    let i = 0; for (let k = 1; k < 4; k++) { if (!h.seats[k]) { i = k; break; } }
+    if (!i) { no('満席です'); return; }
+    h.seats[i] = socket.id; fxHeliOf.set(socket.id, osid);
+    socket.emit('hlSeat', { owner: osid, seat: i }); hlSeatsOut(osid, h);
+  });
+  on('hlLeave', () => {   // 降りた（同乗者なら席を空ける／操縦する人なら、同乗者も全員降ろす）
+    if (fxHeliOf.has(socket.id)) { hlRiderLeft(socket.id); return; }
+    const h = fxHeli.get(socket.id); if (!h || h.seats[0] !== socket.id) return;
+    h.seats[0] = ''; hlKickAll(socket.id, h, false); hlSeatsOut(socket.id, h);
+  });
+  on('hlDmg', (d) => {   // 同乗者が撃たれた → ダメージは機体が受ける（持ち主に教える）
+    const osid = fxHeliOf.get(socket.id); if (!osid || !d || typeof d !== 'object') return;
+    if (!fxRate(players[socket.id], 'hlDmg', 20, 30)) return;
+    const dmg = Math.max(0, Math.min(250, Math.floor(Number(d.dmg) || 0))); if (!dmg) return;
+    io.to(osid).emit('hlHit', { dmg: dmg });
+  });
+  on('hlGone', (d) => {   // ヘリが壊れた・片づけた
+    if (!fxHeli.has(socket.id)) return;
+    hlOwnerGone(socket.id, d && d.boom ? 1 : 0);
   });
 
   on('fxDeviceIdAsk', (d) => {   // ★Owner だけ：ユーザー名から DeviceID を調べる。答えは、聞いた本人にだけ返す（ほかの人には送らない）
@@ -1686,12 +1720,13 @@ on('fxBanRequest', (d) => {
     console.log('退出:', players[socket.id] ? players[socket.id].name : socket.id);
     try { trdLeft(socket.id); } catch (e) { console.error('[trade]', e); }   // ★トレード中なら、取りやめにする
     fxPlaneLast.delete(socket.id);   // ★飛行機の記憶も消す
+    try { hlLeft(socket.id); } catch (e) { console.error('[heli]', e); }   // ★ヘリに乗っていた／持っていたなら、後始末
         fxrFreeRider(socket.id);   // ★乗っていたトロッコを空きにする
     if (fxPlaneSids.delete(socket.id)) io.to(GAME_ROOM).emit('plGone', { sid: socket.id, boom: 0 });
     try { duelLeft(socket.id); } catch (e) { console.error('[duel]', e); }
     delete players[socket.id];
     io.emit('playerLeft', { id: socket.id });
-    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); fxrResetAll();}   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
+    if (Object.keys(players).length === 0) { fxBlocksResetAll(); fxDrops.clear(); fxPlaneLast.clear(); fxPlaneSids.clear(); fxHeli.clear(); fxHeliOf.clear(); fxrResetAll();}   // ★誰もいなくなったら、ブロックも壊れた建物も、飛行機の記憶も、はじめに戻す
     for (const id of Object.keys(fxPlaced)) {
       if (fxPlaced[id].ownerSid === socket.id) { delete fxPlaced[id]; io.emit('fxPlacedRemove', { id: id, reason: 'left' }); }
     }
@@ -2036,4 +2071,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.22・ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.23・ヘリ／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）起動しました。ポート: ' + PORT));
