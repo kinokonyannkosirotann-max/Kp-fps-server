@@ -287,12 +287,13 @@ function generateCrateLayout() {
   const rand = makeSeededRandom(ONLINE_MAP_SEED);
   const H = FIELD_HALF;
   const list = [];
-  for (let i = 0; i < 6; i++) {
-    let x, z;
+  const N_NORMAL = Math.max(6, Math.round(H * H / 5000));   // ★ふつうの箱の数（広さに合わせて自動。半径425なら約36個）
+  const N_RARE = Math.max(2, Math.round(N_NORMAL / 4));     // ★レアな箱の数（ふつうの箱の4分の1。半径425なら約9個）
+  for (let i = 0; i < N_NORMAL; i++) {    let x, z;
     do { x = (rand() - 0.5) * H * 1.7; z = (rand() - 0.5) * H * 1.7; } while (Math.hypot(x - ONLINE_TOWER.x, z - ONLINE_TOWER.z) < 20);
     list.push({ id: 'crate_' + i, x, z, isRare: false, alive: true });
   }
-  for (let i = 0; i < 2; i++) {
+  for (let i = 0; i < N_RARE; i++) {
     let x, z;
     do { x = (rand() - 0.5) * H * 1.7; z = (rand() - 0.5) * H * 1.7; } while (Math.hypot(x - ONLINE_TOWER.x, z - ONLINE_TOWER.z) < 20);
     list.push({ id: 'rare_crate_' + i, x, z, isRare: true, alive: true });
