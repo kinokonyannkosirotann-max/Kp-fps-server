@@ -228,8 +228,8 @@ function fxViolation(socket, p, why) {   // おかしな知らせを数えて、
 }
   const FX_RESTRICTED_RE = /^(item_)?(banrod|godrifle|kami_[a-z0-9_]*|nuke[0-9]*|stab|railgun)$/;   // Owner 以外は、持ち出し・トレード・出品ができない物
 const FX_MELEE_RE = /(knife|sword|mace|axe|hammer|spear|scythe|dagger|chain|stick|staff)/i;       // 近接武器
-const FX_MELEE_REACH = 18;       // 近接武器が当てられる最大の距離(m)。ふつうは4mほど。通信の遅れの分を、多めに見ている
-const FX_RANGED_REACH = 800;     // 遠距離武器の最大の距離(m)
+const FX_MELEE_REACH = 16;       // 近接武器が当てられる最大の距離(m)。ふつうは4mほど。通信の遅れの分を、多めに見ている
+const FX_RANGED_REACH = 630;     // 遠距離武器の最大の距離(m)
 const FX_MULTI_WINDOW_MS = 400;  // この時間(ms)の間に…
 const FX_MULTI_MAX = 4;          // …この人数より多くに当てたら、killaura とみなす（爆発・オービタルは数えない）
 const FX_AREA_RE = /(nuke|stab|railgun|rocket|grenade|tnt|molotov|m79|flare|flash|lava|wither|thunder|blaze|mine|turret|bomb)/i;
