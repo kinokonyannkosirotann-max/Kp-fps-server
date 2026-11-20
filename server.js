@@ -679,6 +679,44 @@ io.on('connection', (socket) => {
       return fn.apply(this, arguments);
     }));
   };
+  
+
+    // ==========================================
+  // 🕵️ チート検知コマンドの記録
+  // ==========================================
+  let fxTrapLastAt = 0;
+
+  on('fxTrap', (d) => {
+    const p = players[socket.id];
+    if (!p || !d) return;
+
+    // 連続送信を制限
+    const now = Date.now();
+    if (now - fxTrapLastAt < 1500) return;
+    fxTrapLastAt = now;
+
+    const kind = String(d.kind || '').slice(0, 16);
+    const cmd = String(d.cmd || '').slice(0, 40);
+
+    if (!kind || !cmd) return;
+
+    // IDと名前はクライアントから受け取らず、サーバー内の情報を使う
+    fxGasPost({
+      action: 'fpsTrapLog',
+      secret: TRADE_SECRET,
+      id: p.id,
+      name: p.name,
+      kind: kind,
+      cmd: cmd
+    }).then((r) => {
+      if (!r || r.status !== 'success') {
+        console.error('[fxTrap] GASへの記録失敗:', r);
+      }
+    }).catch((e) => {
+      console.error('[fxTrap] エラー:', e && e.message);
+    });
+  });
+
 
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
   socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
