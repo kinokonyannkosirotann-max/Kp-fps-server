@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.23：ver.22 ＋ ヘリコプター（4人乗り））
+//  KP銃ゲー オンライン対戦サーバー（ver.24：ver.23 ＋ /hp・守るアイテムの落とし物の検問）
+//   ★ver.24 の追加：/hp（fxHpAsk／fxShield：Owner だけ・体力＋シールド）／飛行機キットなどを、コマンド・宝箱以外から「落とし物」に出せなくする（fxDropSpawn の検問）／fxItemCheat（不正入手のログ）
 //   ★ver.23 の追加：ヘリコプター（hlState／hlBoard／hlLeave／hlDmg／hlGone：席の割り当て・位置の中継・同乗者のダメージを機体へ）
 //   ★ver.22 の追加：ボスBot（bossSpawn／bossDead）／ /tell（whisper）／ /duel（duelAsk・duelReply・duelBack）／ 決闘場（高さ250以上）の落とし物は5分残す
 //   ★ver.21 の追加：killFeed に weaponId（倒した武器）を付ける／updateState の hs（ホームシールド中）を全員に配る
@@ -61,7 +62,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.23・ヘリ／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.24・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
 
@@ -116,7 +117,7 @@ const players = {};
 // ---------- ★ver.14：通信量を減らす道具 ----------
 const GAME_ROOM = 'fpsGame';            // ゲームに入っている人だけの「部屋」。位置の知らせは、この部屋の人にだけ送る（チャット用の接続には送らない）
 const BCAST_KEEPALIVE_MS = 3500;        // 前回と同じ内容の時は、この間隔(ms)に1回だけ送る（動いている間は、0.1秒ごとのまま）
-const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1, ipk: 1, hits: 1, };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
+const HIDE_KEYS = { velX: 1, velZ: 1, lastUpdateT: 1, lastGodHitAt: 1, lastDeath: 1, rate: 1, id: 1, owner: 1, banLock: 1, vio: 1, lastAct: 1, lastHitBy: 1, ipk: 1, hits: 1, shd: 1, crateAt: 1, gotProt: 1, };  // ★id（アカウントのID）を、みんなに配らないように（IDが見えると、なりすまされるため）   // サーバーの中だけで使う項目（みんなには送らない）
 const round2 = (v) => (typeof v === 'number' ? Math.round(v * 100) / 100 : v);      // 1cm 単位
 const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v);    // 向きは 0.001 単位
 function publicPlayers() {   // みんなに送る形（中身は players と同じで、内部用の項目を外し、数字を丸めたもの）
@@ -555,6 +556,19 @@ const FX_DROP_PER_EVENT = 60;             // 1回の知らせで落とせる数
 const FX_DROP_PICK_REACH = 8;             // 拾う時：サーバーが知っている位置から、この距離(m)まで（通信の遅れの余裕を含む）
 const FX_DROP_ID_RE = /^[a-z0-9_]{1,32}$/;
 const FX_DROP_DENY_RE = /^(item_)?(banrod|godrifle|kami_.*)$/;
+const FX_PROT_RE = /^(item_)?(plane_kit|plane_bomb|heli_kit|heli_missile)$/;   // ★ver.24：「コマンド・落とし物・宝箱以外では手に入らない」アイテム（増やす時は、クライアント fx49 の GD_ITEMS にも同じものを足してください）
+function fxProtDropOk(socket, p, it, src) {   // 守るアイテムを「落とし物」に出していいか：やられた直後／箱をこわした直後（1つにつき1個）／拾った直後の戻し（1回）だけ。それ以外は出せない
+  if (!it || typeof it !== 'object') return true;
+  const id = String(it.id || ''); if (!FX_PROT_RE.test(id)) return true;
+  const now = Date.now(), pid = id.replace(/^item_/, '');
+  let ok = false;
+  if (src === 'death') ok = !!(p.lastDeath && now - p.lastDeath.at < 8000);
+  else if (src === 'crate') { if (p.crateAt && now - p.crateAt < 6000) { p.crateAt = 0; ok = true; } }
+  else if (src === 'trash') { const g = p.gotProt; if (g && g.id === pid && !g.used && now - g.at < 4000) { g.used = true; ok = true; } }
+  if (ok) { it.n = Math.min(Math.max(1, Number(it.n) || 1), 20); return true; }
+  fxViolation(socket, p, '許可のない保護アイテムの落とし物: ' + id + '（' + src + '）');
+  return false;
+}
 const fxDrops = new Map();                // 番号 → 落とし物
 let fxDropSeq = 0;
 function fxDropPublic(r) { return { did: r.did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at, x: r.x, y: r.y, z: r.z, s: r.s, src: r.src, rare: r.rare }; }
@@ -880,7 +894,7 @@ io.on('connection', (socket) => {
     if (!p || !d || !Array.isArray(d.list) || !fxRate(p, 'dropSpawn', 3, 8)) return;
     const src = (d.src === 'death' || d.src === 'crate') ? d.src : 'trash';
     const recs = [];
-    for (let i = 0; i < d.list.length && i < FX_DROP_PER_EVENT; i++) { const r = fxDropClean(d.list[i], src, socket.id); if (r) recs.push(r); }
+    for (let i = 0; i < d.list.length && i < FX_DROP_PER_EVENT; i++) { if (!fxProtDropOk(socket, p, d.list[i], src)) continue; const r = fxDropClean(d.list[i], src, socket.id); if (r) recs.push(r); }
     if (!recs.length) return;
     fxDropMakeRoom(recs.length);
     const pub = recs.map((r) => { r.did = ++fxDropSeq; fxDrops.set(r.did, r); return fxDropPublic(r); });
@@ -893,6 +907,7 @@ io.on('connection', (socket) => {
     const r = fxDrops.get(did);
     if (!r) return;
     if (Math.hypot(p.x - r.x, p.z - r.z) > FX_DROP_PICK_REACH || Math.abs(p.y - r.y) > FX_DROP_PICK_REACH + 4) return;   // 遠すぎる
+    if (FX_PROT_RE.test(String(r.id || ''))) p.gotProt = { id: String(r.id).replace(/^item_/, ''), at: Date.now(), used: false };   // ★守るアイテムを拾った：入りきらなくて足元に戻す時だけ、すぐ落とせるように覚える
     fxDrops.delete(did);
     io.to(GAME_ROOM).emit('fxDropGone', { ids: [did] });
     socket.emit('fxDropGot', { did: did, k: r.k, id: r.id, n: r.n, am: r.am, at: r.at });
@@ -932,6 +947,7 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     const crate = d && onlineCrates.find(c => c.id === d.crateId);
     if (!crate || !crate.alive) return;
     crate.alive = false;
+    { const bp = players[socket.id]; if (bp) bp.crateAt = Date.now(); }   // ★箱をこわした：すぐあとの「箱の落とし物」に、守るアイテムを出していい（1回だけ）
     io.emit('crateUpdate', onlineCrates);
     setTimeout(() => {
       const H = FIELD_HALF;
@@ -956,6 +972,27 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
 
   // ---- ★飛行機の同期：位置・向きなどを、ほかの人にそのまま中継する（数字は範囲内に直す）。最後の状態は、あとから入った人のために覚えておく ----
   let plLastAt = 0;
+  // ---- ★ver.24：/hp（Owner だけ）と、不正入手の報告 ----
+  on('fxShield', (d) => {   // 自分のシールドの量（/hp で見るため。ほかの人には配りません）
+    const p = players[socket.id]; if (!p || !d || typeof d !== 'object' || !fxRate(p, 'shd', 5, 10)) return;
+    p.shd = Math.round(num(d.v, 0, 500, 0));
+  });
+  on('fxHpAsk', (d) => {   // ★Owner だけ：その人の体力＋シールドを、聞いた本人にだけ返す
+    const me = players[socket.id]; if (!me || !fxRate(me, 'hpask', 2, 4)) return;
+    const name = String((d && d.name) || '').trim().slice(0, 40).toLowerCase();
+    (async () => {
+      if (!(await fxOwnerRefresh(false))) { socket.emit('fxHpInfo', { ok: false, why: 'Owner だけが使えます' }); return; }
+      if (!name) { socket.emit('fxHpInfo', { ok: false, why: '名前がありません' }); return; }
+      const sid = Object.keys(players).find((s) => String(players[s].name || '').toLowerCase() === name);
+      if (!sid) { socket.emit('fxHpInfo', { ok: false, why: 'その名前の人はいません' }); return; }
+      const t = players[sid];
+      socket.emit('fxHpInfo', { ok: true, name: t.name, health: Math.max(0, Math.round(Number(t.health) || 0)), shield: Math.max(0, Math.round(Number(t.shd) || 0)) });
+    })().catch((e) => console.error('[hp]', e && e.message));
+  });
+  on('fxItemCheat', (d) => {   // クライアントが「不正な入手をブロックした」と報告してきた：ログに名前を残すだけ（切断はしません）
+    const p = players[socket.id]; if (!p || !d || typeof d !== 'object' || !fxRate(p, 'itemcheat', 0.2, 2)) return;
+    console.warn('[不正？] ' + p.name + ' : 不正なアイテム入手をクライアントがブロック: ' + String(d.id || '').slice(0, 32) + ' ×' + (Math.round(Number(d.n)) || 0));
+  });
   on('plState', (d) => {
     if (!d || typeof d !== 'object' || !players[socket.id]) return;
     const now = Date.now(); if (now - plLastAt < 50) return; plLastAt = now;
@@ -2071,4 +2108,4 @@ process.on('uncaughtException', (e) => { console.error('[想定外のエラー]'
 process.on('unhandledRejection', (e) => { console.error('[想定外のエラー]', e && e.message ? e.message : e); });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.23・ヘリ／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）起動しました。ポート: ' + PORT));
+server.listen(PORT, () => console.log('KP銃ゲー オンラインサーバー（ver.24・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）起動しました。ポート: ' + PORT));
