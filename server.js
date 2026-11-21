@@ -1,5 +1,7 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.24：ver.23 ＋ /hp・守るアイテムの落とし物の検問）
+//  KP銃ゲー オンライン対戦サーバー（ver.25：ver.24 ＋ IP BAN の取りこぼし対策・ログ）
+//   ★ver.25 の追加：IP BAN が消えないように（GASに書けるまでメモリから消さない）／あとから読み込んだ BAN でも今入っている人を切る／入室時にも IP BAN を確認／IPv6の先頭64ビットの取り方を修正／IP_DEBUG_LOG（Render のログに IP BAN の動きを出す）
+//  （ver.24：ver.23 ＋ /hp・守るアイテムの落とし物の検問）
 //   ★ver.24 の追加：/hp（fxHpAsk／fxShield：Owner だけ・体力＋シールド）／飛行機キットなどを、コマンド・宝箱以外から「落とし物」に出せなくする（fxDropSpawn の検問）／fxItemCheat（不正入手のログ）
 //   ★ver.23 の追加：ヘリコプター（hlState／hlBoard／hlLeave／hlDmg／hlGone：席の割り当て・位置の中継・同乗者のダメージを機体へ）
 //   ★ver.22 の追加：ボスBot（bossSpawn／bossDead）／ /tell（whisper）／ /duel（duelAsk・duelReply・duelBack）／ 決闘場（高さ250以上）の落とし物は5分残す
@@ -30,6 +32,8 @@ const LOCAL_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 function originOk(o) { if (typeof o !== 'string' || !o) return false; if (ALLOWED_ORIGIN_RE.test(o)) return true; return ALLOW_LOCAL && LOCAL_RE.test(o); }
 const crypto = require('crypto');
 const IP_XFF_FROM_RIGHT = 1;   // ★ x-forwarded-for の「右から何番目」を本人のIPとみなすか（まず Render のログで確認：下の [ip確認] の行を見る）
+const IP_DEBUG_LOG = true;     // ★true の間、IP BAN の動きを Render のログに出す（原因が分かって落ち着いたら false に）
+let lastIpBlockLogAt = 0;
 const ipBans = new Map();      // IPの目印（ハッシュ）→ { until: 解除の時刻(ms)。0＝ずっと, at: 登録時刻 }
 function ipOf(req) {
   const h = (req && req.headers) || {};
@@ -37,9 +41,19 @@ function ipOf(req) {
   const xff = String(h['x-forwarded-for'] || '').split(',').map((s) => s.trim()).filter(Boolean);
   return first(h['cf-connecting-ip']) || first(h['true-client-ip']) || xff.slice(-IP_XFF_FROM_RIGHT)[0] || (req && req.socket && req.socket.remoteAddress) || '';
 }
+function ipv6Prefix(ip) {   // IPv6 の先頭64ビット（"::" の省略も正しく広げてから取る）
+  ip = String(ip).split('%')[0];
+  const parts = ip.split('::');
+  const A = parts[0] ? parts[0].split(':') : [];
+  const B = parts.length > 1 && parts[1] ? parts[1].split(':') : [];
+  let g = A;
+  if (parts.length > 1) g = A.concat(new Array(Math.max(0, 8 - A.length - B.length)).fill('0'), B);
+  while (g.length < 4) g.push('0');
+  return g.slice(0, 4).map((x) => (String(x || '0').toLowerCase().replace(/^0+(?=.)/, ''))).join(':');
+}
 function ipKey(ip) {   // 生のIPは保存しない。塩つきのハッシュにする（IPv6は先頭64ビットでひとまとめ）
   ip = String(ip || '').replace(/^::ffff:/, '');
-  if (ip.indexOf(':') >= 0) ip = ip.split(':').slice(0, 4).join(':');
+  if (ip.indexOf(':') >= 0) ip = ipv6Prefix(ip);
   return crypto.createHash('sha256').update((process.env.IPBAN_SALT || TRADE_SECRET || 'kp') + '|' + ip).digest('hex').slice(0, 32);
 }
 function ipBanned(key) {
@@ -55,14 +69,14 @@ const io = new Server(server, {
     const o = req.headers.origin;
     const ok = originOk(o);
     if (!ok) { const t = Date.now(); if (t - lastOriginWarnAt > 5000) { lastOriginWarnAt = t; console.warn('[接続を断りました] 許可されていないサイト: ' + (o || '（Originなし）')); } }
-    if (ok && ipLogN < 5) { ipLogN++; console.log('[ip確認] cf=' + (req.headers['cf-connecting-ip'] || '-') + ' true=' + (req.headers['true-client-ip'] || '-') + ' xff=' + (req.headers['x-forwarded-for'] || '-')); }
-    if (ok && ipBanned(ipKey(ipOf(req)))) { cb(null, false); return; }   // ★IP BAN されたネットワークからは、つながらない
+    if (ok && ipLogN < 5) { ipLogN++; console.log('[ip確認] cf=' + (req.headers['cf-connecting-ip'] || '-') + ' true=' + (req.headers['true-client-ip'] || '-') + ' xff=' + (req.headers['x-forwarded-for'] || '-') + ' → 使うIP=' + ipOf(req) + ' key=' + ipKey(ipOf(req)).slice(0, 8)); }
+    if (ok && ipBanned(ipKey(ipOf(req)))) { if (IP_DEBUG_LOG) { const t2 = Date.now(); if (t2 - lastIpBlockLogAt > 3000) { lastIpBlockLogAt = t2; console.log('[IPBAN 接続拒否] key=' + ipKey(ipOf(req)).slice(0, 8)); } } cb(null, false); return; }   // ★IP BAN されたネットワークからは、つながらない
     cb(null, ok);
   },
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.24・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.25・IP BAN強化・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
 
@@ -747,6 +761,9 @@ io.on('connection', (socket) => {
       if (WCFG.pass && String((d && d.pass) || '') !== WCFG.pass) { deny('pass', '合言葉が違います'); return; }
     }
     
+    const ipk0 = ipKey(ipOf(socket.request));
+    if (ipBanned(ipk0)) { if (IP_DEBUG_LOG) console.log('[IPBAN 入室拒否] key=' + ipk0.slice(0, 8)); deny('banned', 'このネットワークからは入れません（IP BAN）'); return; }   // ★つなぎ口のチェックをすり抜けても、ここで止める
+    if (IP_DEBUG_LOG) console.log('[入室確認] ' + rawName.slice(0, 12) + ' key=' + ipk0.slice(0, 8));
     const tb = fxTempBan.get(rawId);
     if (tb && tb > Date.now()) { deny('banned', '不正の疑いで、しばらく入れません（あと約' + Math.ceil((tb - Date.now()) / 60000) + '分）'); return; }
     joining = true;
@@ -2090,15 +2107,36 @@ function ipKickAll(key) {   // そのIPのつなぎ（メイン＋個人サー�
 function ipBanAdd(key, minutes, reason, me, name) {
   if (!key) return;
   const until = minutes > 0 ? Date.now() + minutes * 60000 : 0;
-  ipBans.set(key, { until: until, at: Date.now() });
-  fxGasPost({ action: 'fpsIpBanAdd', secret: TRADE_SECRET, id: me.id, key: key, until: until, reason: reason, name: name }).catch(() => {});
+  const rec = { until: until, at: Date.now(), saved: false };   // saved: GAS のシートに書けたか（書けるまでは、メモリの BAN を消さない）
+  ipBans.set(key, rec);
+  console.log('[IPBAN登録] key=' + key.slice(0, 8) + ' ' + (minutes > 0 ? minutes + '分' : 'ずっと') + ' 名前=' + name);
+  const send = (n) => {
+    fxGasPost({ action: 'fpsIpBanAdd', secret: TRADE_SECRET, id: me.id, key: key, until: until, reason: reason, name: name }).then((j) => {
+      if (j && (j.status === 'success' || j.ok === true)) { rec.saved = true; return; }
+      console.error('[IPBAN保存失敗] GASの返事=' + JSON.stringify(j || null).slice(0, 200) + '（GAS に fpsIpBanAdd がありますか？）');
+      rec.saved = false;
+    }).catch((e) => {
+      console.error('[IPBAN保存失敗]', e && e.message);
+      if (n < 3) setTimeout(() => send(n + 1), 20000);
+    });
+  };
+  send(1);
 }
 async function ipBansLoad() {   // GAS に記録されている IP BAN を読み込む（起動時と5分ごと。シートから行を消せば、解除される）
   const j = await fxGasPost({ action: 'fpsIpBanList', secret: TRADE_SECRET });
-  if (!j || j.status !== 'success' || !Array.isArray(j.list)) return;
+  if (!j || j.status !== 'success' || !Array.isArray(j.list)) { if (IP_DEBUG_LOG) console.warn('[IPBAN一覧] GASから読めませんでした（GAS に fpsIpBanList がありますか？）'); return; }
   const seen = {};
-  j.list.forEach((r) => { if (r && /^[0-9a-f]{32}$/.test(String(r.key))) { seen[r.key] = 1; if (!ipBans.has(r.key)) ipBans.set(r.key, { until: Number(r.until) || 0, at: 0 }); } });
-  ipBans.forEach((v, k) => { if (!seen[k] && Date.now() - v.at > 2 * 60 * 1000) ipBans.delete(k); });
+  j.list.forEach((r) => {
+    if (!r || !/^[0-9a-f]{32}$/.test(String(r.key))) return;
+    seen[r.key] = 1;
+    if (!ipBans.has(r.key)) {
+      const u = Number(r.until) || 0;
+      ipBans.set(r.key, { until: u, at: 0 });
+      if (!u || u > Date.now()) ipKickAll(r.key);   // ★あとから読み込んだ BAN でも、いま入っている人は切る
+    }
+  });
+  ipBans.forEach((v, k) => { if (!seen[k] && v.saved !== false && Date.now() - v.at > 2 * 60 * 1000) ipBans.delete(k); });   // シートから消された（＝解除）。ただし、まだシートに書けていない BAN は残す
+  if (IP_DEBUG_LOG) console.log('[IPBAN一覧] シート=' + j.list.length + '件 / メモリ=' + ipBans.size + '件');
 }
 setTimeout(() => { ipBansLoad().catch(() => {}); }, 3000);
 setInterval(() => { ipBansLoad().catch(() => {}); }, 5 * 60 * 1000);
