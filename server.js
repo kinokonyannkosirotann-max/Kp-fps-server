@@ -104,11 +104,33 @@ const FX_BAD_NAMES = ['プレイヤー', 'ユーザー', 'ゲスト', 'player', 
 async function fxIdentity(deviceId, fresh) {
   const id = String(deviceId || '').trim();
   if (!id || !GAS_URL) return null;
-  const c = fxOwnerCache.get(id), now = Date.now();
-  if (c && c.info && now - c.at < 30000 && !(fresh && c.info.owner)) return c.info;
-  const j = await fxGasPost({ action: 'fpsOwnerCheck', id: id });
-  if (!j || j.status !== 'success') return null;   // 聞けなかった時は記憶しない
-  const info = { verified: typeof j.exists === 'boolean', owner: j.owner === true, exists: j.exists === true, name: String(j.name || ''), banned: j.banned === true, banReason: String(j.banReason || '') };
+
+  const c = fxOwnerCache.get(id);
+  const now = Date.now();
+
+  if (c && c.info && now - c.at < 30000 &&
+      !(fresh && (c.info.owner || c.info.admin))) {
+    return c.info;
+  }
+
+  const j = await fxGasPost({
+    action: 'fpsOwnerCheck',
+    id: id
+  });
+
+  if (!j || j.status !== 'success') return null;
+
+  const info = {
+    verified: typeof j.exists === 'boolean',
+    owner: j.owner === true,
+    admin: j.admin === true,
+    exists: j.exists === true,
+    rank: String(j.rank || ''),
+    name: String(j.name || ''),
+    banned: j.banned === true,
+    banReason: String(j.banReason || '')
+  };
+
   fxOwnerCache.set(id, { info: info, at: now });
   return info;
 }
@@ -796,15 +818,46 @@ io.on('connection', (socket) => {
   socket.emit('fxWorldInfo', pubInfo());
 
   
-  async function fxOwnerRefresh(fresh) {   // いまこの接続の人が Owner かを、GASで確かめて、本人に知らせる
-    const p = players[socket.id];
-    if (!p) return false;
-    const ok = await fxIsOwnerId(p.id, fresh);
-    const q = players[socket.id];
-    if (q) q.owner = ok;
-    socket.emit('fxOwner', { owner: ok });
-    return ok;
-  }
+async function fxOwnerRefresh(fresh) {
+  const p = players[socket.id];
+  if (!p) return false;
+
+  const info = await fxIdentity(p.id, fresh);
+  const q = players[socket.id];
+
+  if (!q || !info) return false;
+
+  q.owner = info.owner === true;
+  q.admin = info.admin === true;
+
+  socket.emit('fxOwner', {
+    owner: q.owner,
+    admin: q.admin
+  });
+
+  return q.owner;
+}
+  // Owner または Admin のBAN権限を、GASで毎回確認
+async function fxBanAuthorityRefresh(fresh) {
+  const p = players[socket.id];
+  if (!p) return false;
+
+  const info = await fxIdentity(p.id, fresh);
+  const q = players[socket.id];
+
+  if (!q || !info) return false;
+
+  q.owner = info.owner === true;
+  q.admin = info.admin === true;
+
+  socket.emit('fxOwner', {
+    owner: q.owner,
+    admin: q.admin
+  });
+
+  return q.owner || q.admin;
+}
+  
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
   let joining = false, joinTries = 0;
@@ -1154,15 +1207,15 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     })().catch((e) => { console.error('[deviceid]', e && e.message); reply({ ok: false, msg: 'エラーが出ました' }); });
   });
 
-// ---- 👻 Owner専用：透明化の管理 ----
+// ---- Owner・Admin専用：透明化の管理 ----
 on('fxInvis', async (d) => {
   const p = players[socket.id];
   if (!p || !d) return;
 
-  if (!(await fxOwnerRefresh(true))) {
+  if (!(await fxBanAuthorityRefresh(true))) {
     socket.emit('fxInvis', {
       ok: false,
-      msg: 'Owner だけが使えます'
+      msg: 'Owner または Admin だけが使えます'
     });
     return;
   }
@@ -1179,7 +1232,11 @@ on('fxInvis', async (d) => {
 
   io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
 
-  console.log('[透明化]', q.name, q.invis ? 'ON' : 'OFF');
+  console.log(
+    '[透明化]',
+    q.name,
+    q.invis ? 'ON' : 'OFF'
+  );
 });
   
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
@@ -1195,10 +1252,10 @@ on('fxBanRequest', (d) => {
 
     const me = players[socket.id];
 
-    if (!me.owner) {
-      reply(false, 'Owner だけが使えます');
-      return;
-    }
+if (!me.owner && !me.admin) {
+  reply(false, 'Owner または Admin だけが使えます');
+  return;
+}
 
     let tsid = (d.targetId && players[String(d.targetId)])
       ? String(d.targetId)
@@ -1271,9 +1328,12 @@ on('fxBanRequest', (d) => {
 
     // ★本人確認とBANの書きこみは、演出と同時に、裏で進める
     const task = (async () => {
-      if (!(await fxOwnerRefresh(true))) {
-        return { ok: false, msg: 'Owner だけが使えます' };
-      }
+if (!(await fxBanAuthorityRefresh(true))) {
+  return {
+    ok: false,
+    msg: 'Owner または Admin だけが使えます'
+  };
+}
 
       const j = await fxGasPost({
         action: 'fpsOwnerBan',
