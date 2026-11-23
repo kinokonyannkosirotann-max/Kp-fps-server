@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.25：ver.24 ＋ IP BAN の取りこぼし対策・ログ）
+//  KP銃ゲー オンライン対戦サーバー（ver.26：ver.25 ＋ 地面を掘れる）
+//   ★ver.26 の追加：地面を掘れる（草→土→石→深層岩）／掘った穴はサーバーが覚えて、20分で元に戻す／爆発でも穴があく（アイテムは出ない）／掘った穴の中にはブロックを置ける
 //   ★ver.25 の追加：IP BAN が消えないように（GASに書けるまでメモリから消さない）／あとから読み込んだ BAN でも今入っている人を切る／入室時にも IP BAN を確認／IPv6の先頭64ビットの取り方を修正／IP_DEBUG_LOG（Render のログに IP BAN の動きを出す）
 //  （ver.24：ver.23 ＋ /hp・守るアイテムの落とし物の検問）
 //   ★ver.24 の追加：/hp（fxHpAsk／fxShield：Owner だけ・体力＋シールド）／飛行機キットなどを、コマンド・宝箱以外から「落とし物」に出せなくする（fxDropSpawn の検問）／fxItemCheat（不正入手のログ）
@@ -76,7 +77,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.25・IP BAN強化・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.26・地面掘り・IP BAN強化・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
 
@@ -504,7 +505,7 @@ function fxBodyHits(x, y, z, exceptSid) {   // 置こうとする升目に、ほ
 function fxPlaceWhyNot(p, sid, x, y, z) {   // 置けない理由の文（置けるなら ''）
   if (p.y >= NETHER_Y) return 'ネザーではブロックを使えません';
   if (x < -FX_BLOCK_HALF || x + 1 > FX_BLOCK_HALF || z < -FX_BLOCK_HALF || z + 1 > FX_BLOCK_HALF) return 'マップの端には置けません';
-  if (y < 0) return '地面より下には置けません';
+  if (y < 0 && !(DIG_ON && -y <= digGet(x, z))) return '地面より下には置けません';   // 掘った穴の中（空気の升目）にだけ置ける
   if (y > FX_BLOCK_MAX_Y) return 'これより高くは置けません';
   if (!fxNear(p, x + 0.5, y + 0.5, z + 0.5, FX_BLOCK_REACH)) return '遠すぎます。近づいてください';
   if (fxBlocks.has(fxKeyOf(x, y, z))) return 'そこには、もうブロックがあります';
@@ -542,9 +543,69 @@ function fxMapBreakKeys(keys) {   // 壊れた建物として記録する。新�
 }
 function fxBlocksResetAll() {   // 誰もいなくなったら、ブロックも壊れた建物も、はじめの状態に戻す
   fxBlocks.clear();
+  digCols.clear();
   for (const k of Object.keys(fxBlockOwned)) delete fxBlockOwned[k];
   fxMapBroken.clear();
 }
+// ---------- ★ver.26：地面を掘る（草→土→石→深層岩）。掘った穴はここで覚えて、20分たったら元に戻す ----------
+// ---- 地面のブロックの種類と、爆発の穴の形（クライアントとサーバーで同じ計算にするための部分） ----
+const DIG_MAXD = 64, DIG_STONE = 20;
+const DIG_KINDS = ['grass', 'dirt', 'stone', 'deepslate', 'bedrock'];
+function digHash(ix, iz) { let h = Math.imul(ix, 73856093) ^ Math.imul(iz, 19349663); h = Math.imul(h ^ (h >>> 13), 1274126177); return (h ^ (h >>> 16)) >>> 0; }
+function digDirtT(ix, iz) { return 3 + digHash(ix >> 2, iz >> 2) % 3; }   // 土の厚さ（3〜5。4×4の升目ごとに同じ）
+function digKindIdx(ix, iz, L) {   // L＝上から数えた層（0＝草ブロック）→ 0草 1土 2石 3深層岩 4岩盤
+  if (L <= 0) return 0;
+  const T = digDirtT(ix, iz);
+  if (L <= T) return 1;
+  if (L <= T + DIG_STONE) return 2;
+  if (L < DIG_MAXD) return 3;
+  return 4;
+}
+function digBlastCols(x, y, z, R, maxD, maxCols, cb) {   // 爆発（中心 x,y,z ・半径 R）で穴になる升目を cb(ix, iz, 新しい深さ) で順に渡す
+  const R2 = R * R; let n = 0;
+  for (let ix = Math.floor(x - R); ix <= Math.floor(x + R); ix++) {
+    for (let iz = Math.floor(z - R); iz <= Math.floor(z + R); iz++) {
+      const ddx = ix + 0.5 - x, ddz = iz + 0.5 - z, h2 = ddx * ddx + ddz * ddz;
+      if (h2 > R2) continue;
+      const nd = Math.min(maxD, Math.floor(Math.sqrt(R2 - h2) - y - 0.5) + 1);
+      if (nd < 1) continue;
+      if (++n > maxCols) return;
+      cb(ix, iz, nd);
+    }
+  }
+}
+const DIG_ON = IS_MAIN || !!WCFG.blocks;        // ブロックが使えるワールドだけ、地面も掘れる
+const DIG_HALF = 300, DIG_N = DIG_HALF * 2;     // ★クライアント(fx51)の DIG_HALF と同じ数字に（掘れる範囲：中心から ±300m）
+const DIG_RESTORE_MS = 20 * 60 * 1000;          // ★クライアントの DIG_RESTORE_MS と同じ数字に（最後に掘ってから、元に戻るまで）
+const DIG_MULTI = 6, DIG_TOWER_R = 16, DIG_REACH = 14, DIG_MAX_COLS = 40000;   // いちどに掘れる層の数／塔のまわりの掘れない半径／届く距離／穴になっていられる升目の合計
+const DIG_BLAST_R = 14, DIG_BLAST_D = 10, DIG_BLAST_COLS = 700, DIG_BLAST_MIN_R = 2;   // ★クライアントと同じ数字に（爆発の穴）
+const digCols = new Map();                      // 掘れている升目：番号 → { d: 深さ(層), t: 最後に変わった時刻 }
+function digIdx(ix, iz) { return (iz + DIG_HALF) * DIG_N + (ix + DIG_HALF); }
+function digGet(ix, iz) { if (ix < -DIG_HALF || ix >= DIG_HALF || iz < -DIG_HALF || iz >= DIG_HALF) return 0; const c = digCols.get(digIdx(ix, iz)); return c ? c.d : 0; }
+function digInField(ix, iz) { const L = Math.min(DIG_HALF - 2, FX_BLOCK_HALF - 1); return ix + 0.5 > -L && ix + 0.5 < L && iz + 0.5 > -L && iz + 0.5 < L; }
+function digTower(ix, iz) { return Math.abs(ix + 0.5 - ONLINE_TOWER.x) < DIG_TOWER_R && Math.abs(iz + 0.5 - ONLINE_TOWER.z) < DIG_TOWER_R; }
+function digBroadcast(tri) { for (let i = 0; i < tri.length; i += 9000) io.emit('fxDigSet', { a: tri.slice(i, i + 9000) }); }
+function digSendAll(sock) {   // いまの穴を、ぜんぶ送る（入った時・つなぎ直した時）
+  const a = []; let first = true;
+  const flush = () => { sock.emit('fxDigList', { reset: first, a: a.splice(0, a.length) }); first = false; };
+  digCols.forEach((c, idx) => { a.push(idx % DIG_N - DIG_HALF, Math.floor(idx / DIG_N) - DIG_HALF, c.d); if (a.length >= 9000) flush(); });
+  if (first || a.length) flush();
+}
+setInterval(() => {   // 5秒ごとに、20分たった穴を元に戻す（穴の中に置かれたブロックも消える）
+  if (!digCols.size) return;
+  const now = Date.now(), due = [];
+  digCols.forEach((c, idx) => { if (now - c.t >= DIG_RESTORE_MS) due.push(idx); });
+  if (!due.length) return;
+  const tri = [], keys = [];
+  due.forEach((idx) => {
+    digCols.delete(idx);
+    const ix = idx % DIG_N - DIG_HALF, iz = Math.floor(idx / DIG_N) - DIG_HALF;
+    tri.push(ix, iz, 0);
+    if (fxBlocks.size) { for (let y = -1; y >= -DIG_MAXD; y--) { const k = fxKeyOf(ix, y, iz); if (fxBlockRemoveKey(k)) keys.push(k); } }
+  });
+  digBroadcast(tri);
+  for (let i = 0; i < keys.length; i += 300) io.emit('fxBlockRemove', { keys: keys.slice(i, i + 300), fx: false });
+}, 5000);
 function fxBotBlocked(x, z, y) {   // その場所（Botの体の大きさ）に、ブロックが重なっているか
   if (!fxBlocks.size) return false;
   const y0 = Math.floor(y - 1.0), y1 = Math.floor(y + 1.1), r = 0.45;
@@ -731,7 +792,7 @@ io.on('connection', (socket) => {
   };
 
   // 「新しいサーバーです」と知らせる（クライアントは、これが届いた時だけ、新しい機能を使います）
-  socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
+  socket.emit('fxServerInfo', { v: SERVER_VERSION, nChests: FX_NCHEST_COUNT, blocks: true, blockMax: FX_BLOCK_MAX_TOTAL, restoreMs: FX_MAP_RESTORE_MS, drops: true, dig: DIG_ON, digHalf: DIG_HALF, digRestoreMs: DIG_RESTORE_MS });   // blocks＝ブロック対応／drops＝ドロップアイテム対応
   socket.emit('fxWorldInfo', pubInfo());
 
   
@@ -1571,6 +1632,43 @@ on('fxBanRequest', (d) => {
     const fresh = fxMapBreakKeys(maps);
     if (gone.length) io.emit('fxBlockRemove', { keys: gone, fx: true });
     if (fresh.length) io.emit('fxMapBroken', { keys: fresh, remain: FX_MAP_RESTORE_MS });
+  });
+
+  // ---- ★ver.26：地面を掘る ----
+  on('fxDigSync', () => { if (DIG_ON) digSendAll(socket); });
+  on('fxDigHit', (d) => {   // つるはしで掘った（x,z の升目を、上から to 層めまで掘る）
+    const p = players[socket.id];
+    if (!DIG_ON || !p || !d || !Number.isInteger(d.x) || !Number.isInteger(d.z) || !Number.isInteger(d.to)) return;
+    const ix = d.x, iz = d.z, deny = (why) => socket.emit('fxDigDenied', { x: ix, z: iz, reason: why });
+    if (p.y >= NETHER_Y) { deny('ネザーでは掘れません'); return; }
+    if (!fxRate(p, 'dig', 12, 16)) { deny('速すぎます。少しゆっくり掘ってください'); return; }
+    if (!digInField(ix, iz) || digTower(ix, iz)) { deny('ここは掘れません'); return; }
+    const cur = digGet(ix, iz);
+    if (cur >= DIG_MAXD) { deny('これ以上は掘れません（岩盤）'); return; }
+    const to = Math.min(d.to, cur + DIG_MULTI, DIG_MAXD);
+    if (to <= cur) { socket.emit('fxDigSet', { a: [ix, iz, cur] }); return; }   // 先に誰かが掘っていた：本当の深さだけ教える
+    if (!fxNear(p, ix + 0.5, -to + 0.5, iz + 0.5, DIG_REACH)) { deny('遠すぎます。近づいてください'); return; }
+    if (cur === 0 && digCols.size >= DIG_MAX_COLS) { deny('掘られすぎています（しばらくすると元に戻ります）'); return; }
+    const kinds = [];
+    for (let L = cur; L < to; L++) kinds.push(DIG_KINDS[digKindIdx(ix, iz, L)]);
+    digCols.set(digIdx(ix, iz), { d: to, t: Date.now() });
+    socket.emit('fxDigGot', { x: ix, z: iz, y0: cur, k: kinds });   // 掘った本人にだけ、手に入る物を知らせる（サーバーが決めた物だけ）
+    io.emit('fxDigSet', { a: [ix, iz, to] });
+  });
+  on('fxDigBlast', (d) => {   // 爆発：穴があくだけ（アイテムは出ない）
+    const p = players[socket.id];
+    if (!DIG_ON || !p || !d || p.y >= NETHER_Y) return;
+    const x = Number(d.x), y = Number(d.y), z = Number(d.z), r = Number(d.r);
+    if (![x, y, z, r].every(Number.isFinite) || Math.abs(x) > DIG_HALF + 30 || Math.abs(z) > DIG_HALF + 30 || y < -100 || y > 400 || r < DIG_BLAST_MIN_R || r > 60) return;
+    if (!fxRate(p, 'digblast', 4, 8) || Math.hypot(p.x - x, p.z - z) > 450) return;
+    const out = [], now = Date.now();
+    digBlastCols(x, y, z, Math.min(r, DIG_BLAST_R), DIG_BLAST_D, DIG_BLAST_COLS, (ix, iz, nd) => {
+      if (!digInField(ix, iz) || digTower(ix, iz) || nd <= digGet(ix, iz)) return;
+      if (digGet(ix, iz) === 0 && digCols.size >= DIG_MAX_COLS) return;
+      digCols.set(digIdx(ix, iz), { d: nd, t: now });
+      out.push(ix, iz, nd);
+    });
+    if (out.length) digBroadcast(out);
   });
 
     // ---- ★線路とトロッコ ----
