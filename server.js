@@ -105,16 +105,36 @@ const FX_BAD_NAMES = ['プレイヤー', 'ユーザー', 'ゲスト', 'player', 
 async function fxIdentity(deviceId, fresh) {
   const id = String(deviceId || '').trim();
   if (!id || !GAS_URL) return null;
+
   const c = fxOwnerCache.get(id), now = Date.now();
-  if (c && c.info && now - c.at < 30000 && !(fresh && c.info.owner)) return c.info;
+
+  if (
+    c && c.info &&
+    now - c.at < 30000 &&
+    !(fresh && (c.info.owner || c.info.admin))
+  ) return c.info;
+
   const j = await fxGasPost({ action: 'fpsOwnerCheck', id: id });
-  if (!j || j.status !== 'success') return null;   // 聞けなかった時は記憶しない
-  const info = { verified: typeof j.exists === 'boolean', owner: j.owner === true, exists: j.exists === true, name: String(j.name || ''), banned: j.banned === true, banReason: String(j.banReason || '') };
+  if (!j || j.status !== 'success') return null;
+
+  const info = {
+    verified: typeof j.exists === 'boolean',
+    owner: j.owner === true,
+    admin: j.admin === true || String(j.rank || '') === 'Admin',
+    exists: j.exists === true,
+    name: String(j.name || ''),
+    banned: j.banned === true,
+    banReason: String(j.banReason || '')
+  };
+
   fxOwnerCache.set(id, { info: info, at: now });
   return info;
 }
-async function fxIsOwnerId(deviceId, fresh) { const i = await fxIdentity(deviceId, fresh); return !!(i && i.owner); }
 
+async function fxIsOwnerId(deviceId, fresh) {
+  const i = await fxIdentity(deviceId, fresh);
+  return !!(i && i.owner);
+}
 
 
 
@@ -805,15 +825,52 @@ io.on('connection', (socket) => {
   socket.emit('fxWorldInfo', pubInfo());
 
   
-  async function fxOwnerRefresh(fresh) {   // いまこの接続の人が Owner かを、GASで確かめて、本人に知らせる
-    const p = players[socket.id];
-    if (!p) return false;
-    const ok = await fxIsOwnerId(p.id, fresh);
-    const q = players[socket.id];
-    if (q) q.owner = ok;
-    socket.emit('fxOwner', { owner: ok });
-    return ok;
-  }
+  async function fxOwnerRefresh(fresh) {
+  const p = players[socket.id];
+  if (!p) return false;
+
+  const info = await fxIdentity(p.id, fresh);
+  const q = players[socket.id];
+
+  if (!q) return false;
+
+  const owner = !!(info && info.owner);
+  const admin = !!(info && info.admin);
+
+  q.owner = owner;
+  q.admin = admin;
+
+  socket.emit('fxOwner', {
+    owner: owner,
+    admin: admin
+  });
+
+  return owner;
+}
+
+// ★BAN杖・透明化用：Owner または Admin か確認する
+async function fxBanAuthorityRefresh(fresh) {
+  const p = players[socket.id];
+  if (!p) return false;
+
+  const info = await fxIdentity(p.id, fresh);
+  const q = players[socket.id];
+
+  if (!q) return false;
+
+  const owner = !!(info && info.owner);
+  const admin = !!(info && info.admin);
+
+  q.owner = owner;
+  q.admin = admin;
+
+  socket.emit('fxOwner', {
+    owner: owner,
+    admin: admin
+  });
+
+  return owner || admin;
+}
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
   let joining = false, joinTries = 0;
@@ -1168,14 +1225,11 @@ on('fxInvis', async (d) => {
   const p = players[socket.id];
   if (!p || !d) return;
 
-  if (!(await fxOwnerRefresh(true))) {
-    socket.emit('fxInvis', {
-      ok: false,
-      msg: 'Owner だけが使えます'
-    });
-    return;
-  }
-
+if (!(await fxBanAuthorityRefresh(true))) {
+  socket.emit('fxInvis', { ok:false, msg:'Owner または Admin だけが使えます' });
+  return;
+}
+  
   const q = players[socket.id];
   if (!q) return;
 
@@ -1203,13 +1257,12 @@ on('fxInvis', async (d) => {
       return;
     }
 
-    const me = players[socket.id];
-
-    if (!me.owner) {
-      reply(false, 'Owner だけが使えます');
-      return;
-    }
-
+const me = players[socket.id];
+if (!me.owner && !me.admin) {
+  reply(false, 'Owner または Admin だけが使えます');
+  return;
+}
+    
     // ★相手がいる世界（W）と、相手の socket.id。'W|ワールドID|socket.id' ならほかの世界の人、そうでなければこの世界の人
     let W = myBanRef, tsid = null, ghost = false;
     const rawT = String(d.targetId || '');
@@ -1288,9 +1341,9 @@ on('fxInvis', async (d) => {
 
     // ★本人確認とBANの書きこみは、演出と同時に、裏で進める
     const task = (async () => {
-      if (!(await fxOwnerRefresh(true))) {
-        return { ok: false, msg: 'Owner だけが使えます' };
-      }
+      if (!(await fxBanAuthorityRefresh(true))) {
+  return { ok: false, msg: 'Owner または Admin だけが使えます' };
+}
 
       const j = await fxGasPost({
         action: 'fpsOwnerBan',
@@ -1387,7 +1440,7 @@ on('fxInvis', async (d) => {
   // ---- ★ver.27：Owner の BAN杖に、ほかのワールドにいる人の一覧を送る（メイン⇄個人サーバー） ----
   on('fxPWAsk', () => {
     const me = players[socket.id];
-    if (!me || !me.owner || !fxRate(me, 'pwask', 1, 4)) return;
+if (!me || (!me.owner && !me.admin) || !fxRate(me, 'pwask', 1, 4)) return;
     socket.emit('fxPWList', { list: fxOtherWorldPlayers(myBanRef) });
   });
 
