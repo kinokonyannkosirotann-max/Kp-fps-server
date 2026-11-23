@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.26：ver.25 ＋ 地面を掘れる）
+//  KP銃ゲー オンライン対戦サーバー（ver.27：ver.26 ＋ BAN杖が個人サーバーの人にも効く）
+//   ★ver.27 の追加：BAN杖が、ほかのワールド（メイン⇄個人サーバー）にいる人にも使える（fxPWAsk／fxPWList で一覧を送り、fxBanRequest の targetId が 'W|ワールドID|socket.id' なら、その世界の中で演出：fxBanStart／fxBanSlam に ghost=1 を付ける）
 //   ★ver.26 の追加：地面を掘れる（草→土→石→深層岩）／掘った穴はサーバーが覚えて、20分で元に戻す／爆発でも穴があく（アイテムは出ない）／掘った穴の中にはブロックを置ける
 //   ★ver.25 の追加：IP BAN が消えないように（GASに書けるまでメモリから消さない）／あとから読み込んだ BAN でも今入っている人を切る／入室時にも IP BAN を確認／IPv6の先頭64ビットの取り方を修正／IP_DEBUG_LOG（Render のログに IP BAN の動きを出す）
 //  （ver.24：ver.23 ＋ /hp・守るアイテムの落とし物の検問）
@@ -77,7 +78,7 @@ const io = new Server(server, {
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 3 }, concurrencyLimit: 10 }
 });
 
-app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.26・地面掘り・IP BAN強化・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
+app.get('/', (req, res) => res.send('KP銃ゲー オンラインサーバー 稼働中です（ver.27・BAN杖が個人サーバーにも・地面掘り・IP BAN強化・ヘリ／/hp／ボス／/tell／/duel／トレード／Bot BAN／飛行機つき）'));
 
 const SERVER_VERSION = 21;
 
@@ -104,33 +105,11 @@ const FX_BAD_NAMES = ['プレイヤー', 'ユーザー', 'ゲスト', 'player', 
 async function fxIdentity(deviceId, fresh) {
   const id = String(deviceId || '').trim();
   if (!id || !GAS_URL) return null;
-
-  const c = fxOwnerCache.get(id);
-  const now = Date.now();
-
-  if (c && c.info && now - c.at < 30000 &&
-      !(fresh && (c.info.owner || c.info.admin))) {
-    return c.info;
-  }
-
-  const j = await fxGasPost({
-    action: 'fpsOwnerCheck',
-    id: id
-  });
-
-  if (!j || j.status !== 'success') return null;
-
-  const info = {
-    verified: typeof j.exists === 'boolean',
-    owner: j.owner === true,
-    admin: j.admin === true,
-    exists: j.exists === true,
-    rank: String(j.rank || ''),
-    name: String(j.name || ''),
-    banned: j.banned === true,
-    banReason: String(j.banReason || '')
-  };
-
+  const c = fxOwnerCache.get(id), now = Date.now();
+  if (c && c.info && now - c.at < 30000 && !(fresh && c.info.owner)) return c.info;
+  const j = await fxGasPost({ action: 'fpsOwnerCheck', id: id });
+  if (!j || j.status !== 'success') return null;   // 聞けなかった時は記憶しない
+  const info = { verified: typeof j.exists === 'boolean', owner: j.owner === true, exists: j.exists === true, name: String(j.name || ''), banned: j.banned === true, banReason: String(j.banReason || '') };
   fxOwnerCache.set(id, { info: info, at: now });
   return info;
 }
@@ -805,6 +784,14 @@ function hlOwnerGone(osid, boom) {   // ヘリが壊れた・片づけた・持�
 }
 function hlLeft(sid) { hlRiderLeft(sid); hlOwnerGone(sid, 0); }   // 退出した（disconnect から呼ぶ）
 
+// ★ver.27：この世界の「BAN杖用の窓口」（ほかの世界のOwnerが、この世界の人をBANする時に使う）
+const myBanRef = {
+  id: IS_MAIN ? 'main' : WCFG.id, name: IS_MAIN ? 'メインワールド' : WCFG.name, players: players,
+  room: function (ev, pl) { io.to(GAME_ROOM).emit(ev, pl); },
+  to: function (sid, ev, pl) { io.to(sid).emit(ev, pl); },
+  pub: function () { return publicPlayers(); },
+  disc: function (sid) { const s = io.sockets.sockets.get(sid); if (s) s.disconnect(true); }
+};
 io.on('connection', (socket) => {
   const on = function (ev, fn) {
     socket.on(ev, guard(ev, function () {
@@ -818,46 +805,15 @@ io.on('connection', (socket) => {
   socket.emit('fxWorldInfo', pubInfo());
 
   
-async function fxOwnerRefresh(fresh) {
-  const p = players[socket.id];
-  if (!p) return false;
-
-  const info = await fxIdentity(p.id, fresh);
-  const q = players[socket.id];
-
-  if (!q || !info) return false;
-
-  q.owner = info.owner === true;
-  q.admin = info.admin === true;
-
-  socket.emit('fxOwner', {
-    owner: q.owner,
-    admin: q.admin
-  });
-
-  return q.owner;
-}
-  // Owner または Admin のBAN権限を、GASで毎回確認
-async function fxBanAuthorityRefresh(fresh) {
-  const p = players[socket.id];
-  if (!p) return false;
-
-  const info = await fxIdentity(p.id, fresh);
-  const q = players[socket.id];
-
-  if (!q || !info) return false;
-
-  q.owner = info.owner === true;
-  q.admin = info.admin === true;
-
-  socket.emit('fxOwner', {
-    owner: q.owner,
-    admin: q.admin
-  });
-
-  return q.owner || q.admin;
-}
-  
+  async function fxOwnerRefresh(fresh) {   // いまこの接続の人が Owner かを、GASで確かめて、本人に知らせる
+    const p = players[socket.id];
+    if (!p) return false;
+    const ok = await fxIsOwnerId(p.id, fresh);
+    const q = players[socket.id];
+    if (q) q.owner = ok;
+    socket.emit('fxOwner', { owner: ok });
+    return ok;
+  }
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
   let joining = false, joinTries = 0;
@@ -1207,15 +1163,15 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
     })().catch((e) => { console.error('[deviceid]', e && e.message); reply({ ok: false, msg: 'エラーが出ました' }); });
   });
 
-// ---- Owner・Admin専用：透明化の管理 ----
+// ---- 👻 Owner専用：透明化の管理 ----
 on('fxInvis', async (d) => {
   const p = players[socket.id];
   if (!p || !d) return;
 
-  if (!(await fxBanAuthorityRefresh(true))) {
+  if (!(await fxOwnerRefresh(true))) {
     socket.emit('fxInvis', {
       ok: false,
-      msg: 'Owner または Admin だけが使えます'
+      msg: 'Owner だけが使えます'
     });
     return;
   }
@@ -1232,15 +1188,12 @@ on('fxInvis', async (d) => {
 
   io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
 
-  console.log(
-    '[透明化]',
-    q.name,
-    q.invis ? 'ON' : 'OFF'
-  );
+  console.log('[透明化]', q.name, q.invis ? 'ON' : 'OFF');
 });
   
   // ---- ★BAN杖：Owner が相手をBAN（GAS に書きこんでから、演出を全員に配る） ----
-on('fxBanRequest', (d) => {
+  // ★ver.27：ほかのワールド（メイン⇄個人サーバー）にいる人も BAN できる。その人の世界の中で、いつもの演出をして、上にOwnerの残像（ghost）を出す
+  on('fxBanRequest', (d) => {
     if (!d || !players[socket.id]) return;
     const reply = (ok, msg) => socket.emit('fxBanResult', { ok: ok, msg: msg });
     const now = Date.now();
@@ -1252,20 +1205,26 @@ on('fxBanRequest', (d) => {
 
     const me = players[socket.id];
 
-if (!me.owner && !me.admin) {
-  reply(false, 'Owner または Admin だけが使えます');
-  return;
-}
+    if (!me.owner) {
+      reply(false, 'Owner だけが使えます');
+      return;
+    }
 
-    let tsid = (d.targetId && players[String(d.targetId)])
-      ? String(d.targetId)
-      : null;
-
-    if (!tsid) {
-      const q = String(d.targetName || '').trim().toLowerCase();
-      tsid = Object.keys(players).find(
-        s => players[s].name.toLowerCase() === q
-      ) || null;
+    // ★相手がいる世界（W）と、相手の socket.id。'W|ワールドID|socket.id' ならほかの世界の人、そうでなければこの世界の人
+    let W = myBanRef, tsid = null, ghost = false;
+    const rawT = String(d.targetId || '');
+    if (rawT.indexOf('W|') === 0) {
+      const seg = rawT.split('|');
+      const ref = seg.length === 3 ? fxWorldRef(seg[1]) : null;
+      if (ref && ref.players[seg[2]]) { W = ref; tsid = seg[2]; ghost = (ref !== myBanRef); }
+    } else {
+      tsid = (rawT && players[rawT]) ? rawT : null;
+      if (!tsid) {
+        const q = String(d.targetName || '').trim().toLowerCase();
+        tsid = Object.keys(players).find(
+          s => players[s].name.toLowerCase() === q
+        ) || null;
+      }
     }
 
     if (!tsid) {
@@ -1273,24 +1232,25 @@ if (!me.owner && !me.admin) {
       return;
     }
 
-    if (tsid === socket.id) {
+    if (!ghost && tsid === socket.id) {
       reply(false, '自分はBANできません');
       return;
     }
 
-    const t = players[tsid];
+    const t = W.players[tsid];
+    const where = ghost ? '〔' + W.name + '〕' : '';
 
     // ★BAN演出開始時点で透明化を解除（元の機能を維持）
     if (t.invis) {
       t.invis = false;
 
-      io.to(tsid).emit('fxInvis', {
+      W.to(tsid, 'fxInvis', {
         ok: true,
         on: false,
         auto: true
       });
 
-      io.to(GAME_ROOM).emit('playersUpdate', publicPlayers());
+      W.room('playersUpdate', W.pub());
 
       console.log('[透明化解除] BAN杖:', t.name);
     }
@@ -1328,12 +1288,9 @@ if (!me.owner && !me.admin) {
 
     // ★本人確認とBANの書きこみは、演出と同時に、裏で進める
     const task = (async () => {
-if (!(await fxBanAuthorityRefresh(true))) {
-  return {
-    ok: false,
-    msg: 'Owner または Admin だけが使えます'
-  };
-}
+      if (!(await fxOwnerRefresh(true))) {
+        return { ok: false, msg: 'Owner だけが使えます' };
+      }
 
       const j = await fxGasPost({
         action: 'fpsOwnerBan',
@@ -1356,7 +1313,8 @@ if (!(await fxBanAuthorityRefresh(true))) {
       return { ok: false, msg: 'エラーが出ました' };
     });
 
-    io.to(GAME_ROOM).emit('fxBanStart', {
+    // ghost＝1 の時は、Owner はこの世界にいない：受け取った側が、上に「残像」を出す
+    W.room('fxBanStart', {
       ownerSid: socket.id,
       ownerName: me.name,
       targetSid: tsid,
@@ -1365,23 +1323,24 @@ if (!(await fxBanAuthorityRefresh(true))) {
       y: pos.y,
       z: pos.z,
       ms: FX_BAN_SHOW_MS,
-      perm: minutes === 0
+      perm: minutes === 0,
+      ghost: ghost ? 1 : 0
     });
 
     reply(
       true,
-      '執行します：' + tName + (mode === 'ip' ? '（IP BAN）' : '')
+      '執行します：' + tName + where + (mode === 'ip' ? '（IP BAN）' : '')
     );
 
     setTimeout(async () => {
       const r = await task;
 
       if (!r.ok) {
-        const tt = players[tsid];
+        const tt = W.players[tsid];
         if (tt) tt.banLock = 0;
 
         fxBanBusyUntil = 0;
-        io.to(GAME_ROOM).emit('fxBanAbort', {});
+        W.room('fxBanAbort', {});
         reply(false, r.msg);
         return;
       }
@@ -1393,28 +1352,28 @@ if (!(await fxBanAuthorityRefresh(true))) {
         ipBanAdd(tIpk, minutes, reason, me, tName);
       }
 
-      io.to(GAME_ROOM).emit('fxBanSlam', {
+      W.room('fxBanSlam', {
         ownerSid: socket.id,
         targetSid: tsid,
         x: pos.x,
         y: pos.y,
-        z: pos.z
+        z: pos.z,
+        ghost: ghost ? 1 : 0
       });
 
       reply(
         true,
-        'BANしました：' + tName +
+        'BANしました：' + tName + where +
         (mode === 'ip' ? '（IP BAN・' : '（') +
         (minutes ? minutes + '分）' : '無期限）')
       );
 
       setTimeout(() => {
-        io.to(tsid).emit('fxBanKill', {});
+        W.to(tsid, 'fxBanKill', {});
       }, 600);
 
       setTimeout(() => {
-        const s = io.sockets.sockets.get(tsid);
-        if (s) s.disconnect(true);
+        W.disc(tsid);
 
         // ★IP BANの場合、同じIPの接続も切断
         if (mode === 'ip') {
@@ -1423,8 +1382,15 @@ if (!(await fxBanAuthorityRefresh(true))) {
       }, 3600);
 
     }, FX_BAN_SHOW_MS);
-});
-  
+  });
+
+  // ---- ★ver.27：Owner の BAN杖に、ほかのワールドにいる人の一覧を送る（メイン⇄個人サーバー） ----
+  on('fxPWAsk', () => {
+    const me = players[socket.id];
+    if (!me || !me.owner || !fxRate(me, 'pwask', 1, 4)) return;
+    socket.emit('fxPWList', { list: fxOtherWorldPlayers(myBanRef) });
+  });
+
   // ---- ★BAN杖：Owner が Bot をBAN（演出はクライアントだけ。ここでは、Bot を死んだ扱いにするだけ） ----
   on('fxBanBot', (d) => {
     const me = players[socket.id];
@@ -2157,7 +2123,8 @@ function duelLeft(sid) {               // 退出した（disconnect から呼ぶ
 
     return {
     destroy: function () { _iv.forEach(function (h) { clearInterval(h); }); },   // このワールドの定期処理を止める
-    count: function () { return Object.keys(players).length; }
+    count: function () { return Object.keys(players).length; },
+    banRef: function () { return myBanRef; }   // ★ver.27
   };
 }   // ← createWorld ここまで
 
@@ -2167,6 +2134,27 @@ function duelLeft(sid) {               // 退出した（disconnect から呼ぶ
 //   ・個人サーバーの一覧・設定は GAS（シート「個人サーバー」）が持っている。起動時と、設定が変わった時に読み込む
 //   ・GET /worlds … 一覧（人数つき）／ POST /world/boot … 作った・設定を変えた・削除した、の知らせ（持ち主だけ）
 // ==========================================
+// ---------- ★ver.27：ワールドをまたいだ BAN杖（メイン⇄個人サーバー） ----------
+//   各ワールドが banRef（その世界の players と、演出を配る道具）を持っている。BAN杖のOwnerは、ほかのワールドの人を一覧に出して、その世界の中でBANの演出ができる
+function fxWorldRef(wid) {
+  const inst = wid === 'main' ? mainWorld : (worlds.get(wid) || {}).inst;
+  return inst && typeof inst.banRef === 'function' ? inst.banRef() : null;
+}
+function fxOtherWorldPlayers(except) {   // except（Ownerのいる世界）以外の、ぜんぶの世界にいる人
+  const out = [];
+  const add = (ref) => {
+    if (!ref || ref === except) return;
+    for (const sid of Object.keys(ref.players)) {
+      const p = ref.players[sid];
+      if (!p || p.invis || !p.name || out.length >= 60) continue;
+      out.push({ pid: 'W|' + ref.id + '|' + sid, name: String(p.name).slice(0, 24), world: String(ref.name).slice(0, 16) });
+    }
+  };
+  add(fxWorldRef('main'));
+  worlds.forEach((w) => { try { add(w.inst.banRef()); } catch (e) {} });
+  return out;
+}
+
 const WORLD_MAX = 40;                   // 同時に動かせる個人サーバーの数
 const WORLD_BOOT_GAP_MS = 8000;         // 同じサーバーの再起動は、この間隔(ms)あける（いたずら対策）
 const worlds = new Map();               // id → { cfg, inst, nsp }
