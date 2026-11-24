@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.29：ver.28 ＋ 線路・トロッコの作り直し対応）
+//  KP銃ゲー オンライン対戦サーバー（ver.30：ver.29 ＋ /tpa）
+//   ★ver.30 の追加：/tpa（Owner専用）。Owner が /tpa 名前 と打つと、その人が Owner のところへテレポートします。イベント：fxTpa{pid}／fxTpaRes{to,ok,msg} ⇔ fxTpaGo{from,name,x,y,z}／fxTpaReply{ok,msg}。Admin は使えません（Owner だけ・GASで毎回確認）。
 //   ★ver.29 の追加：線路は『地面かブロックの上』にだけ置ける（下のブロックが壊れたら線路も外れる）・坂（1段上の線路）対応・線路／トロッコの回収はサーバーが確かめてから渡す（fxrGive・複製の防止）・トロッコの位置は『線路の上で、ありえる速さ』だけ受け取る・降りた時に線路の外ならトロッコを回収・線路の升目に2台目は置けない。fxrList に v:2。
 //   ★ver.28 の追加：地面を「1ブロックずつ」掘る方式に作り直し（横穴・トンネルもOK／下の段を掘っても、上は残る）。掘った所は、升目ごとのビット(lo/hi)で覚えて、20分で元に戻す。穴の中・トンネルの中に線路を置ける。戻る時に、中の線路・トロッコも片づける。fxServerInfo に digV:2。イベント：fxDigSync／fxDigHit{x,z,l}／fxDigBlast ⇔ fxDigList・fxDigSet{a:[ix,iz,lo,hi,…]}・fxDigGot{x,z,l,k}・fxDigDenied
 //  （ver.27：ver.26 ＋ BAN杖が個人サーバーの人にも効く）
@@ -1878,6 +1879,27 @@ on('fxInvis', async (d) => {
     if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) { socket.emit('fxrDenied', { act: 'cartRm', reason: '遠すぎます。近づいてください' }); return; }
     fxrCartKill(cart);
     socket.emit('fxrGive', { k: 'cart' });
+  });
+
+  // ---- ★ver.30：/tpa（Owner専用：相手を自分のところへ呼ぶ。/tp の逆） ----
+  on('fxTpa', async (d) => {
+    const me = players[socket.id];
+    if (!me || !fxRate(me, 'tpa', 1, 3)) return;
+    const reply = (ok, msg) => socket.emit('fxTpaReply', { ok: !!ok, msg: String(msg).slice(0, 120) });
+    if (!(await fxOwnerRefresh(true))) { reply(false, 'Owner だけが使えます'); return; }   // Admin は使えません（Owner だけ）
+    const q = players[socket.id]; if (!q) return;
+    const tid = String((d && d.pid) || ''), t = players[tid];
+    if (!t || tid === socket.id || !t.name) { reply(false, 'その人は、いま見つかりません（別のワールドにいる人は呼べません）'); return; }
+    io.to(tid).emit('fxTpaGo', { from: socket.id, name: String(q.name || 'Owner').slice(0, 24), x: q.x, y: q.y, z: q.z });
+    console.log('[tpa] ' + q.name + ' が ' + t.name + ' を呼んだ');
+    reply(true, '🌀 ' + t.name + ' を呼んでいます…');
+  });
+  on('fxTpaRes', (d) => {   // 呼ばれた人からの「行きました／行けません」を、呼んだ Owner にだけ伝える
+    const me = players[socket.id], to = String((d && d.to) || '');
+    if (!me || !fxRate(me, 'tpares', 2, 4)) return;
+    const o = players[to]; if (!o || !o.owner || to === socket.id) return;
+    const ok = !!(d && d.ok);
+    io.to(to).emit('fxTpaReply', { ok: ok, msg: ok ? ('✅ ' + String(me.name || '').slice(0, 24) + ' が来ました') : ('⚠️ ' + String(me.name || '').slice(0, 24) + ' は、今は呼べません（' + String((d && d.msg) || '').slice(0, 40) + '）') });
   });
 
   // ---- チャット ----
