@@ -1,5 +1,6 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.28：ver.27 ＋ 地面を1ブロックずつ掘る・穴の中に線路）
+//  KP銃ゲー オンライン対戦サーバー（ver.29：ver.28 ＋ 線路・トロッコの作り直し対応）
+//   ★ver.29 の追加：線路は『地面かブロックの上』にだけ置ける（下のブロックが壊れたら線路も外れる）・坂（1段上の線路）対応・線路／トロッコの回収はサーバーが確かめてから渡す（fxrGive・複製の防止）・トロッコの位置は『線路の上で、ありえる速さ』だけ受け取る・降りた時に線路の外ならトロッコを回収・線路の升目に2台目は置けない。fxrList に v:2。
 //   ★ver.28 の追加：地面を「1ブロックずつ」掘る方式に作り直し（横穴・トンネルもOK／下の段を掘っても、上は残る）。掘った所は、升目ごとのビット(lo/hi)で覚えて、20分で元に戻す。穴の中・トンネルの中に線路を置ける。戻る時に、中の線路・トロッコも片づける。fxServerInfo に digV:2。イベント：fxDigSync／fxDigHit{x,z,l}／fxDigBlast ⇔ fxDigList・fxDigSet{a:[ix,iz,lo,hi,…]}・fxDigGot{x,z,l,k}・fxDigDenied
 //  （ver.27：ver.26 ＋ BAN杖が個人サーバーの人にも効く）
 //   ★ver.27 の追加：BAN杖が、ほかのワールド（メイン⇄個人サーバー）にいる人にも使える（fxPWAsk／fxPWList で一覧を送り、fxBanRequest の targetId が 'W|ワールドID|socket.id' なら、その世界の中で演出：fxBanStart／fxBanSlam に ghost=1 を付ける）
@@ -546,6 +547,7 @@ function fxBlockRemoveKey(key) {   // 1個消す（消せたら true）
   fxBlocks.delete(key);
   const n = (fxBlockOwned[b.owner] || 1) - 1;
   if (n > 0) fxBlockOwned[b.owner] = n; else delete fxBlockOwned[b.owner];
+  if (fxRails.size) fxrDropRail(fxKeyOf(b.x, b.y + 1, b.z));   // ★ver.29：下のブロックが無くなったら、上の線路も外す
   return true;
 }
 function fxBlockSnapshot() {   // いまの全部（参加した人・つなぎ直した人に送る）
@@ -718,17 +720,40 @@ function fxrSnapshot() {
   const list = [], carts = [];
   fxRails.forEach((r) => { list.push([r.x, r.y, r.z, r.ax]); });
   fxCarts.forEach((c) => { carts.push(fxCartInfo(c)); });
-  return { list: list, carts: carts };
+  return { v: 2, list: list, carts: carts };
 }
 function fxrResetAll() { fxRails.clear(); fxCarts.clear(); for (const k of Object.keys(fxRailOwned)) delete fxRailOwned[k]; }
-function fxrDropRail(key) {   // 線路を1本消す（持ち主の数も減らす）。消せたら true
+function fxrSupported(x, y, z) {   // 線路の下が、地面かブロックか（掘って空気になった所は×）
+  const by = y - 1;
+  if (by >= 0) return fxBlocks.has(fxKeyOf(x, by, z));
+  return !(DIG_ON && digAirAt(x, by, z));
+}
+function fxrCartCell(x, y, z) {   // トロッコがいる線路の升目のキー（線路の上でなければ null）
+  const cx = Math.floor(x), cz = Math.floor(z), y0 = Math.floor(y + 1e-4);
+  const k0 = fxKeyOf(cx, y0, cz); if (fxRails.has(k0)) return k0;
+  const k1 = fxKeyOf(cx, y0 - 1, cz); if (fxRails.has(k1)) return k1;
+  return null;
+}
+function fxrCartsAt(key) { const out = []; fxCarts.forEach((c) => { if (!c.rider && fxrCartCell(c.x, c.y, c.z) === key) out.push(c); }); return out; }
+function fxrCartKill(c) { fxCarts.delete(c.id); io.to(GAME_ROOM).emit('fxrCartGone', { id: c.id }); }
+function fxrDropRail(key, killed) {   // 線路を1本消す（持ち主の数も減らす）。上にいた空きのトロッコも消える（killed に入れて返す）。消せたら true
   const r = fxRails.get(key); if (!r) return false;
+  const on = fxrCartsAt(key);   // 線路があるうちに調べる
   fxRails.delete(key);
   const n = (fxRailOwned[r.owner] || 1) - 1; if (n > 0) fxRailOwned[r.owner] = n; else delete fxRailOwned[r.owner];
-  io.to(GAME_ROOM).emit('fxrRemove', { key: key }); return true;
+  io.to(GAME_ROOM).emit('fxrRemove', { key: key });
+  on.forEach((c) => { fxrCartKill(c); if (killed) killed.push(c); });
+  return true;
 }
-function fxrFreeRider(sid) {   // この人が乗っているトロッコを、空きにする 
-  fxCarts.forEach((c) => { if (c.rider === sid) { c.rider = null; c.sp = 0; io.to(GAME_ROOM).emit('fxrCartRider', { id: c.id, rider: null }); } });
+function fxrFreeRider(sid) {   // この人が乗っているトロッコを空きにする。線路の外に出ていたら片づけて、片づけた台数を返す
+  let lost = 0;
+  fxCarts.forEach((c) => {
+    if (c.rider !== sid) return;
+    c.rider = null; c.sp = 0;
+    if (!fxrCartCell(c.x, c.y, c.z)) { fxrCartKill(c); lost++; return; }
+    io.to(GAME_ROOM).emit('fxrCartRider', { id: c.id, rider: null });
+  });
+  return lost;
 }
 
 // ---------- ★ver.19：プレイヤー同士のトレード（/trade）＋ BAN杖で Bot をBAN ----------
@@ -1766,7 +1791,7 @@ on('fxInvis', async (d) => {
     if (out.length) digBroadcast(out);
   });
 
-    // ---- ★線路とトロッコ ----
+  // ---- ★線路とトロッコ（ver.29：足場チェック・回収はサーバーが確かめてから渡す・トロッコの動きの検査） ----
   on('fxrSync', () => { socket.emit('fxrList', fxrSnapshot()); });
   on('fxrPlace', (d) => {
     const p = players[socket.id], c = fxCell(d);
@@ -1778,6 +1803,7 @@ on('fxInvis', async (d) => {
     if (!fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) { deny('遠すぎます。近づいてください'); return; }
     const key = fxKeyOf(c[0], c[1], c[2]);
     if (fxRails.has(key) || fxBlocks.has(key)) { deny('そこにはもう物があります'); return; }
+    if (!fxrSupported(c[0], c[1], c[2])) { deny('線路は、地面かブロックの上に置いてください'); return; }
     const own = fxOwnerKey(p, socket.id);
     if (fxRails.size >= FXR_MAX_RAILS) { deny('線路は、みんなで合計 ' + FXR_MAX_RAILS + ' 本までです'); return; }
     if ((fxRailOwned[own] || 0) >= FXR_MAX_RAILS_PER) { deny('あなたが置いておける線路は ' + FXR_MAX_RAILS_PER + ' 本までです'); return; }
@@ -1786,15 +1812,15 @@ on('fxInvis', async (d) => {
     fxRailOwned[own] = (fxRailOwned[own] || 0) + 1;
     io.to(GAME_ROOM).emit('fxrAdd', { x: c[0], y: c[1], z: c[2], ax: ax });
   });
-  on('fxrBreak', (d) => {
+  on('fxrBreak', (d) => {   // 線路を回収：サーバーが消せた時だけ、本人に fxrGive（線路1本＋上にいた空きトロッコ）を送る
     const p = players[socket.id], c = fxCell(d);
     if (!p || !c || !fxRate(p, 'railb', 10, 14)) return;
-    const key = fxKeyOf(c[0], c[1], c[2]), r = fxRails.get(key);
-    if (!r || !fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) return;
-    fxRails.delete(key);
-    const n = (fxRailOwned[r.owner] || 1) - 1;
-    if (n > 0) fxRailOwned[r.owner] = n; else delete fxRailOwned[r.owner];
-    io.to(GAME_ROOM).emit('fxrRemove', { key: key });
+    const key = fxKeyOf(c[0], c[1], c[2]);
+    if (!fxRails.has(key) || !fxNear(p, c[0] + 0.5, c[1] + 0.5, c[2] + 0.5, FX_BLOCK_REACH)) return;
+    const killed = [];
+    if (!fxrDropRail(key, killed)) return;
+    socket.emit('fxrGive', { k: 'rail' });
+    killed.forEach(() => socket.emit('fxrGive', { k: 'cart' }));
   });
   on('fxrCartSpawn', (d) => {
     const p = players[socket.id], c = fxCell(d);
@@ -1808,35 +1834,50 @@ on('fxInvis', async (d) => {
     if (fxCarts.size >= FXR_MAX_CARTS) { deny('トロッコは、みんなで合計 ' + FXR_MAX_CARTS + ' 台までです'); return; }
     let dx = Math.sign(Number(d.dx) || 0), dz = Math.sign(Number(d.dz) || 0);
     if (Math.abs(dx) + Math.abs(dz) !== 1) { dx = 1; dz = 0; }
-    const cart = { id: 'k' + (++fxCartSeq), x: c[0] + 0.5, y: c[1], z: c[2] + 0.5, dx: dx, dz: dz, sp: 0, rider: null, owner: own };
+    const hh = Number(d.h), cx = c[0] + 0.5, cz = c[2] + 0.5, yy = c[1] + (Number.isFinite(hh) ? Math.max(0, Math.min(1, hh)) : 0);   // 坂の升目なら、真ん中の高さ
+    let busy = false; fxCarts.forEach((k) => { if (Math.hypot(k.x - cx, k.z - cz) < 0.9 && Math.abs(k.y - yy) < 1.5) busy = true; });
+    if (busy) { deny('そこには、もうトロッコがあります'); return; }
+    const cart = { id: 'k' + (++fxCartSeq), x: cx, y: yy, z: cz, dx: dx, dz: dz, sp: 0, rider: null, owner: own, ts: Date.now() };
     fxCarts.set(cart.id, cart);
     io.to(GAME_ROOM).emit('fxrCartAdd', fxCartInfo(cart));
   });
   on('fxrCartBoard', (d) => {
     const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
     if (!p || !cart || !fxRate(p, 'cartb', 2, 4)) return;
-    if (cart.rider && cart.rider !== socket.id && players[cart.rider]) { socket.emit('fxrDenied', { act: 'board', reason: '誰かが乗っています' }); return; }
-    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) { socket.emit('fxrDenied', { act: 'board', reason: '遠すぎます。近づいてください' }); return; }
-    fxrFreeRider(socket.id);
-    cart.rider = socket.id;
+    const deny = (why) => socket.emit('fxrDenied', { act: 'board', reason: why });
+    if (cart.rider && cart.rider !== socket.id && players[cart.rider]) { deny('誰かが乗っています'); return; }
+    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) { deny('遠すぎます。近づいてください'); return; }
+    if (!fxrCartCell(cart.x, cart.y, cart.z)) { deny('このトロッコは、線路の上にありません'); return; }
+    const lost = fxrFreeRider(socket.id);
+    for (let i = 0; i < lost; i++) socket.emit('fxrGive', { k: 'cart' });
+    if (!fxCarts.has(cart.id)) return;
+    cart.rider = socket.id; cart.sp = 0; cart.ts = Date.now();
     io.to(GAME_ROOM).emit('fxrCartRider', { id: cart.id, rider: socket.id });
     socket.emit('fxrBoarded', { id: cart.id });
   });
-  on('fxrCartLeave', () => { fxrFreeRider(socket.id); });
-  on('fxrCartState', (d) => {
+  on('fxrCartLeave', () => {   // 降りた時：トロッコが線路の外（線路が壊された所）なら、回収して本人に返す
+    const lost = fxrFreeRider(socket.id);
+    for (let i = 0; i < lost; i++) socket.emit('fxrGive', { k: 'cart' });
+  });
+  on('fxrCartState', (d) => {   // 乗っている人から、トロッコの位置。線路の上で、ありえる速さの時だけ受け取る
     const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
     if (!p || !cart || cart.rider !== socket.id || !fxRate(p, 'cartS', 25, 40)) return;
-    cart.x = fxNum(d.x, 400); cart.y = fxNum(d.y, 400); cart.z = fxNum(d.z, 400); cart.sp = fxNum(d.sp, 60);
+    const x = fxNum(d.x, 400), y = fxNum(d.y, 400), z = fxNum(d.z, 400), now = Date.now();
+    const dt = Math.min(30, Math.max(0.05, (now - (cart.ts || now)) / 1000));
+    if (Math.hypot(x - cart.x, z - cart.z) + Math.abs(y - cart.y) > 36 * dt + 3) return;   // ワープのような動きは無視
+    if (!fxrCartCell(x, y, z)) return;   // 線路の上でなければ無視
+    cart.x = x; cart.y = y; cart.z = z; cart.ts = now; cart.sp = Math.max(0, Math.min(40, fxNum(d.sp, 60)));
     cart.dx = Math.sign(Number(d.dx) || 0); cart.dz = Math.sign(Number(d.dz) || 0);
     if (Math.abs(cart.dx) + Math.abs(cart.dz) !== 1) { cart.dx = 1; cart.dz = 0; }
     socket.to(GAME_ROOM).emit('fxrCartState', { id: cart.id, x: cart.x, y: cart.y, z: cart.z, dx: cart.dx, dz: cart.dz, sp: cart.sp });
   });
-  on('fxrCartRemove', (d) => {
+  on('fxrCartRemove', (d) => {   // トロッコを回収：サーバーが消せた時だけ、本人に fxrGive を送る
     const p = players[socket.id], cart = d && fxCarts.get(String(d.id));
-    if (!p || !cart || (cart.rider && players[cart.rider])) return;
-    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) return;
-    fxCarts.delete(cart.id);
-    io.to(GAME_ROOM).emit('fxrCartGone', { id: cart.id });
+    if (!p || !cart || !fxRate(p, 'cartr', 3, 6)) return;
+    if (cart.rider && players[cart.rider]) { socket.emit('fxrDenied', { act: 'cartRm', reason: '誰かが乗っています' }); return; }
+    if (!fxNear(p, cart.x, cart.y + 0.5, cart.z, FX_BLOCK_REACH)) { socket.emit('fxrDenied', { act: 'cartRm', reason: '遠すぎます。近づいてください' }); return; }
+    fxrCartKill(cart);
+    socket.emit('fxrGive', { k: 'cart' });
   });
 
   // ---- チャット ----
