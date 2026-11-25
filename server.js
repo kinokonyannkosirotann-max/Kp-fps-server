@@ -233,6 +233,11 @@ function guard(name, fn) {   // 1つの通信でエラーが出ても、サー�
 // ==========================================
 const FX_HIT_SAFE_R = 10.5, FX_HIT_SAFE_Y = 88;   // 出現の塔（半径9・てっぺん約92m）の上からは、ダメージを出せない（クライアントの「塔を出るまで攻撃できない」と同じ）
 const FX_HIT_ORBITAL_RE = /^(nuke[0-9]*|stab|railgun|godrifle)$/;   // 大きなダメージが出てよい武器（別の入れ物で数える）
+// ★ver.32：武器の「台帳」。Owner の画面から「ほんとうにある武器の名前」を教えてもらい（fxWeaponReg）、台帳にない名前の武器は、ダメージ・発射・振りに使えない
+//   （ブックマークレットなどで、勝手に作った武器を使う人への対策）。Owner が一度つながるまでは、台帳がないので何も止めない。false にすると、チェックを全部やめる
+const FX_WEAPON_GUARD = true;
+let fxWeaponIds = null;
+const FX_WEAPON_EXTRA = new Set(['pistol', 'bow', 'plane_gun', 'plane_bomb', 'heli_missile', 'kb_stick', 'banrod', 'turret', 'mine', 'fist', 'punch', 'melee']);   // 台帳に入っていなくても、いつも通す名前（飛行機・ヘリ・BAN杖など、決まった名前）
 const FX_ACTION_WINDOW_MS = 45000;   // 「撃った／振った」知らせから、この時間の間だけヒットを受け付ける（0 にすると、この確認をしない）
 const FX_VIOLATION_KICK = 12;        // 10秒の間に、おかしな知らせがこの回数に届いた接続は、切る
 const FX_TEMPBAN_MS = 10 * 60 * 1000;   // 切られた人が、また入れるようになるまで
@@ -883,6 +888,7 @@ io.on('connection', (socket) => {
     if (!q) return false;
     const owner = !!(info && info.owner), admin = !!(info && info.admin);
     q.owner = owner; q.admin = admin;
+    if (!owner && q.invis) { q.invis = false; socket.emit('fxInvis', { ok: true, on: false }); }   // ★ver.32：Owner でなければ、透明化は強制的に解除
     socket.emit('fxOwner', { owner: owner, admin: admin });
     return owner;
   }
@@ -894,6 +900,7 @@ io.on('connection', (socket) => {
     if (!q) return false;
     const owner = !!(info && info.owner), admin = !!(info && info.admin);
     q.owner = owner; q.admin = admin;
+    if (!owner && q.invis) { q.invis = false; socket.emit('fxInvis', { ok: true, on: false }); }   // ★ver.32：Owner でなければ、透明化は強制的に解除
     socket.emit('fxOwner', { owner: owner, admin: admin });
     return owner || admin;
   }
@@ -915,11 +922,34 @@ io.on('connection', (socket) => {
         const owner = !!info.owner, admin = !!info.admin;
         q.owner = owner; q.admin = admin;
         socket.emit('fxOwner', { owner: owner, admin: admin });
-        if (!owner && !admin && q.invis) { q.invis = false; socket.emit('fxInvis', { ok: true, on: false }); }
+        if (!owner && q.invis) { q.invis = false; socket.emit('fxInvis', { ok: true, on: false }); }
       }).catch(() => {});
     }
     return true;
   }
+  function fxWeaponBlock(p, wid, tag) {   // ★ver.32：台帳にない名前の武器なら true（＝止める）。Owner たちには、1分に1回だけ知らせる
+    if (!FX_WEAPON_GUARD || !fxWeaponIds || !p) return false;
+    wid = String(wid == null ? '' : wid).slice(0, 40);
+    if (!wid || fxWeaponIds.has(wid) || FX_WEAPON_EXTRA.has(wid) || FX_HIT_ORBITAL_RE.test(wid)) return false;
+    const now = Date.now(), m = p.fxWBad || (p.fxWBad = {});
+    if (!(m[wid] > now - 60000) && Object.keys(m).length < 50) {
+      m[wid] = now;
+      console.warn('[不明な武器] ' + p.name + ' が、台帳にない「' + wid + '」を使いました（' + tag + '）');
+      for (const sid in players) { const o = players[sid]; if (o && o.owner) io.to(sid).emit('fxWeaponAlert', { name: p.name, wid: wid }); }
+    }
+    return true;
+  }
+  on('fxWeaponReg', async (d) => {   // ★Owner の画面から、ほんとうにある武器・アイテムの名前を教えてもらう（Owner だけ）
+    const me = players[socket.id];
+    if (!me || !d || !Array.isArray(d.ids) || !fxRate(me, 'wreg', 0.2, 3)) return;
+    if (!(await fxOwnerFast(false))) return;
+    const add = d.ids.slice(0, 3000).map((x) => String(x == null ? '' : x).slice(0, 40)).filter((x) => x && !/\s/.test(x));
+    const set = new Set(fxWeaponIds || []); add.forEach((x) => set.add(x));
+    if (set.size < 20) return;   // あまりに少ない時は、おかしいので使わない（全部止めてしまわないため）
+    const before = fxWeaponIds ? fxWeaponIds.size : 0;
+    fxWeaponIds = set;
+    if (set.size !== before) console.log('[武器台帳] ' + me.name + ' から受け取りました：' + set.size + ' 種類（+' + (set.size - before) + '）');
+  });
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
   let joining = false, joinTries = 0;
@@ -1000,6 +1030,7 @@ io.on('connection', (socket) => {
     p.pitch = num(d.pitch, -1.6, 1.6, 0);            // ★上下の向き（頭・武器が上を向く）
     p.crouching = !!d.crouching;                      // ★しゃがみ（他の人の画面でもしゃがむ）
     p.weaponId = String(d.weaponId || 'pistol').slice(0, 30);
+    if (fxWeaponBlock(p, p.weaponId, 'updateState')) p.weaponId = 'pistol';   // ★ver.32：台帳にない武器は、ほかの人には見せない
     p.health = num(d.health, -1000, 1000, p.health);
     p.isGliding = !!d.isGliding; p.isParachuting = !!d.isParachuting;
     p.roll = p.isGliding ? num(d.roll, -1.6, 1.6, 0) : 0;   // ★エリトラで傾いている角度（他の人の画面でも体が傾く）
@@ -1014,6 +1045,7 @@ io.on('connection', (socket) => {
     if (++shotWinN > FX_SHOT_MAX_PER_SEC) return;   // 連打しすぎ
     if (Object.keys(d).length > 40) return;         // 項目が多すぎるものは、変な知らせ
     const pa = players[socket.id]; if (pa) pa.lastAct = t;
+    if (pa && fxWeaponBlock(pa, d.weaponId, 'shotFired')) return;   // ★ver.32
     socket.to(GAME_ROOM).emit('remoteShotFired', Object.assign({}, d, { id: socket.id }));   // ★撃った人のID（神器の「撃つ動き」を、その人の人形に出すため）
   });
 
@@ -1021,6 +1053,7 @@ io.on('connection', (socket) => {
         if (!IS_MAIN && !WCFG.pvp) return;   // ★個人サーバー：PvPなし
     const attacker = players[socket.id];
     if (!attacker || !d || typeof d !== 'object') return;
+    if (fxWeaponBlock(attacker, d.weaponId, 'hitPlayer')) return;   // ★ver.32
     const tsid = String(d.targetId || '');
     const target = players[tsid];
     if (!target || tsid === socket.id) { fxViolation(socket, attacker, 'ゲームにいない相手・自分への hitPlayer'); return; }
@@ -1113,6 +1146,7 @@ io.on('connection', (socket) => {
     if (!d) return;
     const me = players[socket.id];
     if (!me || !(me.health > 0) || fxInSafeTower(me) || !fxBucket(me, 'hitB', 40, 30, 1)) return;
+    if (fxWeaponBlock(me, d.weaponId, 'hitBot')) return;   // ★ver.32
     const bot = bots.find(b => b.id === d.botId);
     if (!bot || bot.health <= 0) return;
     if (!fxHitReachOk(me, bot, String(d.weaponId || ''))) { fxViolation(socket, me, '届かない距離のBotへのヒット'); return; }
@@ -1274,8 +1308,8 @@ on('fxInvis', async (d) => {
   const p = players[socket.id];
   if (!p || !d) return;
 
-  if (!(await fxOwnerFast(true))) {
-    socket.emit('fxInvis', { ok: false, msg: 'Owner または Admin だけが使えます' });
+  if (!(await fxOwnerFast(false))) {   // ★ver.32：Owner だけ（Admin は使えない）
+    socket.emit('fxInvis', { ok: false, msg: 'Owner だけが使えます' });
     return;
   }
 
@@ -1587,6 +1621,7 @@ on('fxInvis', async (d) => {
 
   on('meleeSwing', (d) => {
     const pa = players[socket.id]; if (pa) pa.lastAct = Date.now();
+    if (pa && fxWeaponBlock(pa, d && d.weaponId, 'meleeSwing')) return;   // ★ver.32
     socket.to(GAME_ROOM).emit('remoteMeleeSwing', { id: socket.id, weaponId: d && d.weaponId });
   });
 
