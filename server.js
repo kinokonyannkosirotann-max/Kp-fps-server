@@ -897,6 +897,29 @@ io.on('connection', (socket) => {
     socket.emit('fxOwner', { owner: owner, admin: admin });
     return owner || admin;
   }
+  // ★ver.31：/invis・/tpa を速くする。いつも GAS（Google の返事待ち）に聞くのをやめて、
+  //   「10分以内に確かめた Owner／Admin」なら、すぐ通す。そのあと裏で GAS に最新を聞き、資格がなくなっていたら取り消す
+  //   （GAS に聞けなかった時は何も変えない）。記憶がない・古い・Ownerでない時は、今までどおり GAS に聞く
+  const FX_FAST_OK_MS = 10 * 60 * 1000, FX_FAST_BG_MS = 15000;
+  async function fxOwnerFast(needAdmin) {
+    const p = players[socket.id];
+    if (!p) return false;
+    const c = fxOwnerCache.get(String(p.id)), now = Date.now();
+    const okNow = !!(c && c.info && (now - c.at) < FX_FAST_OK_MS && (c.info.owner || (needAdmin && c.info.admin)));
+    if (!okNow) return needAdmin ? fxBanAuthorityRefresh(true) : fxOwnerRefresh(true);
+    if (!(p.fxBgAt > now - FX_FAST_BG_MS)) {
+      p.fxBgAt = now;
+      fxIdentity(p.id, true).then((info) => {
+        if (!info) return;
+        const q = players[socket.id]; if (!q) return;
+        const owner = !!info.owner, admin = !!info.admin;
+        q.owner = owner; q.admin = admin;
+        socket.emit('fxOwner', { owner: owner, admin: admin });
+        if (!owner && !admin && q.invis) { q.invis = false; socket.emit('fxInvis', { ok: true, on: false }); }
+      }).catch(() => {});
+    }
+    return true;
+  }
   on('fxOwnerAsk', () => { fxOwnerRefresh(false).catch(() => {}); });
 
   let joining = false, joinTries = 0;
@@ -1251,7 +1274,7 @@ on('fxInvis', async (d) => {
   const p = players[socket.id];
   if (!p || !d) return;
 
-  if (!(await fxBanAuthorityRefresh(true))) {
+  if (!(await fxOwnerFast(true))) {
     socket.emit('fxInvis', { ok: false, msg: 'Owner または Admin だけが使えます' });
     return;
   }
@@ -1886,7 +1909,7 @@ on('fxInvis', async (d) => {
     const me = players[socket.id];
     if (!me || !fxRate(me, 'tpa', 1, 3)) return;
     const reply = (ok, msg) => socket.emit('fxTpaReply', { ok: !!ok, msg: String(msg).slice(0, 120) });
-    if (!(await fxOwnerRefresh(true))) { reply(false, 'Owner だけが使えます'); return; }   // Admin は使えません（Owner だけ）
+    if (!(await fxOwnerFast(false))) { reply(false, 'Owner だけが使えます'); return; }   // Admin は使えません（Owner だけ）
     const q = players[socket.id]; if (!q) return;
     const tid = String((d && d.pid) || ''), t = players[tid];
     if (!t || tid === socket.id || !t.name) { reply(false, 'その人は、いま見つかりません（別のワールドにいる人は呼べません）'); return; }
