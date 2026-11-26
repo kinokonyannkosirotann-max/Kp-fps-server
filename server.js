@@ -1,5 +1,5 @@
 // ==========================================
-//  KP銃ゲー オンライン対戦サーバー（ver.30：ver.29 ＋ /tpa）
+//  KP銃ゲー オンライン対戦サーバー（ver.33：ver.30 ＋ /invis をOwnerだけ・武器の台帳・不正ログのシート保存）
 //   ★ver.30 の追加：/tpa（Owner専用）。Owner が /tpa 名前 と打つと、その人が Owner のところへテレポートします。イベント：fxTpa{pid}／fxTpaRes{to,ok,msg} ⇔ fxTpaGo{from,name,x,y,z}／fxTpaReply{ok,msg}。Admin は使えません（Owner だけ・GASで毎回確認）。
 //   ★ver.29 の追加：線路は『地面かブロックの上』にだけ置ける（下のブロックが壊れたら線路も外れる）・坂（1段上の線路）対応・線路／トロッコの回収はサーバーが確かめてから渡す（fxrGive・複製の防止）・トロッコの位置は『線路の上で、ありえる速さ』だけ受け取る・降りた時に線路の外ならトロッコを回収・線路の升目に2台目は置けない。fxrList に v:2。
 //   ★ver.28 の追加：地面を「1ブロックずつ」掘る方式に作り直し（横穴・トンネルもOK／下の段を掘っても、上は残る）。掘った所は、升目ごとのビット(lo/hi)で覚えて、20分で元に戻す。穴の中・トンネルの中に線路を置ける。戻る時に、中の線路・トロッコも片づける。fxServerInfo に digV:2。イベント：fxDigSync／fxDigHit{x,z,l}／fxDigBlast ⇔ fxDigList・fxDigSet{a:[ix,iz,lo,hi,…]}・fxDigGot{x,z,l,k}・fxDigDenied
@@ -142,6 +142,39 @@ const TRADE_SECRET = 'Kinoko2013D';   // ★★GAS の「FX38_SECRET」と同じ
 
 
 
+// ★ver.32：武器の「台帳」。Owner の画面から「ほんとうにある武器の名前」を教えてもらい（fxWeaponReg）、台帳にない名前の武器は、ダメージ・発射・振りに使えない
+//   （ブックマークレットなどで、勝手に作った武器を使う人への対策）。Owner が一度つながるまでは、台帳がないので何も止めない。false にすると、チェックを全部やめる
+const FX_WEAPON_GUARD = true;
+let fxWeaponIds = null;
+const FX_WEAPON_EXTRA = new Set(['pistol', 'bow', 'plane_gun', 'plane_bomb', 'heli_missile', 'kb_stick', 'banrod', 'turret', 'mine', 'fist', 'punch', 'melee']);   // 台帳に入っていなくても、いつも通す名前（飛行機・ヘリ・BAN杖など、決まった名前）
+const FX_ITEMFLAG_WEAPONS = new Set(['plane_gun', 'plane_bomb', 'heli_missile']);   // ★ver.33：不正アイテムの疑いがある人が、ダメージを出せなくなる武器
+const FX_ITEMFLAG_MS = 30 * 60 * 1000;                                              // その「疑い」が続く時間（つなぎ直すと、消えます。でも、またズルをすればすぐ付きます）
+// 🗒️ ★ver.33：不正ログ。ログに出すのと同時に、GAS を通して、スプレッドシートの「不正ログ」タブに保存します（GAS を入れていなくても、ゲームは普通に動きます）
+const FX_CHEATLOG_ON = true;
+const fxCheatQ = [], fxCheatSeen = new Map();
+function fxCheatLog(p, kind, detail, world) {
+  try {
+    if (!p) return;
+    const id = String(p.id || ''), name = String(p.name || '').slice(0, 40), now = Date.now();
+    kind = String(kind || '').slice(0, 40); detail = String(detail || '').slice(0, 200);
+    const key = id + '|' + kind + '|' + detail;
+    if ((fxCheatSeen.get(key) || 0) > now - 60000) return;   // 同じ人の同じ内容は、1分に1回だけ
+    if (fxCheatSeen.size > 3000) fxCheatSeen.clear();
+    fxCheatSeen.set(key, now);
+    console.warn('[不正ログ] ' + name + ' | ' + kind + ' | ' + detail);
+    if (FX_CHEATLOG_ON && GAS_URL && fxCheatQ.length < 200) fxCheatQ.push({ t: now, name: name, id: id, kind: kind, detail: detail, world: String(world || '').slice(0, 30), tries: 0 });
+  } catch (e) {}
+}
+async function fxCheatFlush() {
+  if (!fxCheatQ.length || !GAS_URL) return;
+  const rows = fxCheatQ.splice(0, 20);
+  const j = await fxGasPost({ action: 'fpsCheatLog', rows: rows.map((r) => ({ t: r.t, name: r.name, id: r.id, kind: r.kind, detail: r.detail, world: r.world })) });
+  if (j && j.status === 'success') return;
+  const back = rows.filter((r) => ++r.tries <= 3);   // 書けなかった時は、あと3回までやり直す（GAS がまだ新しくなっていない時は、そのうちあきらめる）
+  if (fxCheatQ.length + back.length <= 200) fxCheatQ.unshift(...back);
+}
+setInterval(() => { fxCheatFlush().catch(() => {}); }, 5000);
+
 // ★ver.22：ここから下は「ワールド1つぶんの中身」。ワールドごとに別々に作られます（メイン＋個人サーバー）
 function createWorld(io, WCFG) {
 const IS_MAIN = !!WCFG.main;
@@ -233,11 +266,6 @@ function guard(name, fn) {   // 1つの通信でエラーが出ても、サー�
 // ==========================================
 const FX_HIT_SAFE_R = 10.5, FX_HIT_SAFE_Y = 88;   // 出現の塔（半径9・てっぺん約92m）の上からは、ダメージを出せない（クライアントの「塔を出るまで攻撃できない」と同じ）
 const FX_HIT_ORBITAL_RE = /^(nuke[0-9]*|stab|railgun|godrifle)$/;   // 大きなダメージが出てよい武器（別の入れ物で数える）
-// ★ver.32：武器の「台帳」。Owner の画面から「ほんとうにある武器の名前」を教えてもらい（fxWeaponReg）、台帳にない名前の武器は、ダメージ・発射・振りに使えない
-//   （ブックマークレットなどで、勝手に作った武器を使う人への対策）。Owner が一度つながるまでは、台帳がないので何も止めない。false にすると、チェックを全部やめる
-const FX_WEAPON_GUARD = true;
-let fxWeaponIds = null;
-const FX_WEAPON_EXTRA = new Set(['pistol', 'bow', 'plane_gun', 'plane_bomb', 'heli_missile', 'kb_stick', 'banrod', 'turret', 'mine', 'fist', 'punch', 'melee']);   // 台帳に入っていなくても、いつも通す名前（飛行機・ヘリ・BAN杖など、決まった名前）
 const FX_ACTION_WINDOW_MS = 45000;   // 「撃った／振った」知らせから、この時間の間だけヒットを受け付ける（0 にすると、この確認をしない）
 const FX_VIOLATION_KICK = 12;        // 10秒の間に、おかしな知らせがこの回数に届いた接続は、切る
 const FX_TEMPBAN_MS = 10 * 60 * 1000;   // 切られた人が、また入れるようになるまで
@@ -261,8 +289,10 @@ function fxViolation(socket, p, why) {   // おかしな知らせを数えて、
   if (!p.vio || now - p.vio.at > 10000) p.vio = { n: 0, at: now };
   p.vio.n++;
   if (p.vio.n === 1 || p.vio.n % 5 === 0) console.warn('[不正？] ' + p.name + ' : ' + why + ' (' + p.vio.n + ')');
+  fxCheatLog(p, '不正の疑い', why, WCFG.name);   // ★ver.33
   if (p.vio.n >= FX_VIOLATION_KICK) {
     console.warn('[不正？] 切断しました: ' + p.name);
+    fxCheatLog(p, '切断（不正の疑い）', why, WCFG.name);   // ★ver.33
     fxTempBan.set(String(p.id), now + FX_TEMPBAN_MS);
     try { socket.emit('youWereKicked', {}); } catch (e) {}
     setTimeout(() => { try { socket.disconnect(true); } catch (e) {} }, 200);
@@ -927,14 +957,21 @@ io.on('connection', (socket) => {
     }
     return true;
   }
-  function fxWeaponBlock(p, wid, tag) {   // ★ver.32：台帳にない名前の武器なら true（＝止める）。Owner たちには、1分に1回だけ知らせる
-    if (!FX_WEAPON_GUARD || !fxWeaponIds || !p) return false;
+  function fxWeaponBlock(p, wid, tag) {   // ★ver.32：台帳にない名前の武器なら true（＝止める）。★ver.33：不正アイテムの疑いがある人の、飛行機・ヘリの武器も止める
+    if (!p) return false;
     wid = String(wid == null ? '' : wid).slice(0, 40);
-    if (!wid || fxWeaponIds.has(wid) || FX_WEAPON_EXTRA.has(wid) || FX_HIT_ORBITAL_RE.test(wid)) return false;
+    if (!wid) return false;
+    if (p.fxItemFlagUntil > Date.now() && FX_ITEMFLAG_WEAPONS.has(wid) && !p.owner) {
+      fxCheatLog(p, 'ダメージ無効（不正アイテム）', wid + '／' + tag, WCFG.name);
+      return true;
+    }
+    if (!FX_WEAPON_GUARD || !fxWeaponIds) return false;
+    if (fxWeaponIds.has(wid) || FX_WEAPON_EXTRA.has(wid) || FX_HIT_ORBITAL_RE.test(wid)) return false;
     const now = Date.now(), m = p.fxWBad || (p.fxWBad = {});
     if (!(m[wid] > now - 60000) && Object.keys(m).length < 50) {
       m[wid] = now;
       console.warn('[不明な武器] ' + p.name + ' が、台帳にない「' + wid + '」を使いました（' + tag + '）');
+      fxCheatLog(p, '台帳にない武器', wid + '／' + tag, WCFG.name);
       for (const sid in players) { const o = players[sid]; if (o && o.owner) io.to(sid).emit('fxWeaponAlert', { name: p.name, wid: wid }); }
     }
     return true;
@@ -1216,9 +1253,14 @@ const dmgIn = num(d.damage, 0, 550, 0), hpBefore = bot.health;
       socket.emit('fxHpInfo', { ok: true, name: t.name, health: Math.max(0, Math.round(Number(t.health) || 0)), shield: Math.max(0, Math.round(Number(t.shd) || 0)) });
     })().catch((e) => console.error('[hp]', e && e.message));
   });
-  on('fxItemCheat', (d) => {   // クライアントが「不正な入手をブロックした」と報告してきた：ログに名前を残すだけ（切断はしません）
-    const p = players[socket.id]; if (!p || !d || typeof d !== 'object' || !fxRate(p, 'itemcheat', 0.2, 2)) return;
-    console.warn('[不正？] ' + p.name + ' : 不正なアイテム入手をクライアントがブロック: ' + String(d.id || '').slice(0, 32) + ' ×' + (Math.round(Number(d.n)) || 0));
+  on('fxItemCheat', (d) => {   // クライアントが「不正な入手を見つけた」と報告してきた：ログ＋シートに残す。★ver.33：「強い疑い（ext）」の人は、飛行機・ヘリの武器でダメージを出せなくする
+    const p = players[socket.id]; if (!p || !d || typeof d !== 'object' || !fxRate(p, 'itemcheat', 0.5, 4)) return;
+    const id = String(d.id || '').slice(0, 32), n = Math.round(Number(d.n)) || 0, tot = Math.round(Number(d.total)) || 0;
+    console.warn('[不正？] ' + p.name + ' : 不正なアイテム入手の報告: ' + id + ' ×' + n);
+    if (p.owner) return;   // Owner の試し用の入手は、記録しない
+    const strong = d.ext === true;
+    fxCheatLog(p, strong ? '不正アイテム入手（強い疑い）' : '不正アイテム入手（疑い）', id + ' +' + n + (tot ? '（合計' + tot + '）' : '') + (d.fn ? '／' + String(d.fn).slice(0, 80) : ''), WCFG.name);
+    if (strong) p.fxItemFlagUntil = Date.now() + FX_ITEMFLAG_MS;
   });
   on('plState', (d) => {
     if (!d || typeof d !== 'object' || !players[socket.id]) return;
